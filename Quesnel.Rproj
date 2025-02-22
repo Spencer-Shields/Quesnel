@@ -1,0 +1,18 @@
+Version: 1.0
+ProjectId: 511aa67c-2312-4464-88a1-f107a47f40aa
+
+RestoreWorkspace: Default
+SaveWorkspace: Default
+AlwaysSaveHistory: Default
+
+EnableCodeIndexing: Yes
+UseSpacesForTab: Yes
+NumSpacesForTab: 2
+Encoding: UTF-8
+
+RnwWeave: Sweave
+LaTeX: pdfLaTeX
+
+PythonType: conda
+PythonVersion: 3.12.9
+PythonPath: C:/Users/spenshi/AppData/Local/miniforge3/envs/env1/python.exe
