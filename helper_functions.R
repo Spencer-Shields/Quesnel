@@ -3,7 +3,7 @@
 #----define function for plotting lists of rasters----
 
 list_plot = function(l, single_plot = T){
-  #function for plotting list of named single band rasters
+  #function for plotting list of named single-band rasters
   #rasters must be named
   #single_plot = T makes plots faceted in a grid, otherwise plots will appear in individual windows.
   if(single_plot == T){
@@ -29,6 +29,16 @@ list_plot = function(l, single_plot = T){
       plot(l[[i]], main = names(l)[i])
     })
   }
+}
+
+list_plot_ggRGB = function(l, r = 3, g = 2, b = 1,...){
+  x11()
+  par(mfrow = c(ceiling(sqrt(length(l))), ceiling(sqrt(length(l)))))
+  
+  for(i in 1:length(l)){
+    ggRGB(l[[i]])
+  }
+  par(mfrow = c(1,1))
 }
 
 #----define function for loading separate landsat bands into a spatraster stack----
@@ -89,7 +99,7 @@ di_fn <- function(r, znormed = T) {
   #Make sure that raster stack R has brightness, greenness, and wetness as the first, second, and third bands.
   #The znormed parameter gives the option of not calculating the z-score for each band prior to calculating the z-score.
   if(znormed == T){
-  z_layers <- sapply(1:nlyr(r), function(i) z_rast(r[[i]]))  # Apply calculate z-scores for each layer
+    z_layers <- sapply(1:nlyr(r), function(i) z_rast(r[[i]]))  # Apply calculate z-scores for each layer
   } else{
     z_layers = r
   }
@@ -106,12 +116,189 @@ ps_meta = function(dir, recursive = T){
   jsons = files[str_detect(files, 'metadata\\.json$')]
   if(length(jsons)==0){
     print('No metadata files found in directory.')
-    } else {
-  jsons_l = lapply(jsons, jsonify::from_json)
+  } else {
+    jsons_l = lapply(jsons, jsonify::from_json)
+    
+    json_df <- map_dfr(jsons_l, function(x) {
+      tibble(id = x$id, !!!x$properties)
+    })
+    return(json_df)
+  }
+}
+
+
+#----Define softmax function----
+
+softmax = function(raster, append_name = FALSE){
+  #Calculate softmax function on a multiband spatraster.
+  #Input and output == multiband spatraster.
+  #append_names will add '_softmax' on the end of hte original band names.
+  #NOTE: it is recommended to rescale data to low values (e.g. [0,1]) before using this function.
+  sums = global(exp(raster), 'sum', na.rm = T)
   
-  json_df <- map_dfr(jsons_l, function(x) {
-    tibble(id = x$id, !!!x$properties)
+  sm_l = pblapply(X = 1:nlyr(raster), FUN = function(i){
+    num = exp(raster[[i]])
+    denom = sums$sum[i]
+    sm = num/denom
+    return(sm)
   })
-  return(json_df)
+  
+  sm = rast(sm_l)
+  
+  if(append_name == T){
+    names(sm) = paste0(names(raster),'_softmax')
+  }
+  
+  return(sm)
+  
+}
+
+#----Calculate Hue Index----
+
+hue.vi = function(r, red = 3, green = 2, blue = 1, type = 'Escadafal'){
+  #calculate the Hue Index using RGB bands
+  #bands can be specified using numerical indexing or character vectors representing band names
+  #the 'type' argument specifies whether the equation given by Escadafal et al. (1994) or Mandal (2016)
+  
+  b_r = r[[red]]
+  b_b = r[[blue]]
+  b_g = r[[green]]
+  
+  if(type == 'Escadafal'){
+    
+    h = atan((b_g-b_b)*(2*b_r-b_g-b_b)/30.5)
+    
+  } else {
+    
+    if(type == 'Mandal'){
+      
+      h = (2*b_r-b_g-b_b)/(b_g-b_b)
+      
+    } else {
+      print('Error: type of Hue unrecognized')
     }
+  }
+  
+  names(h) = 'Hue'
+  return(h)
+}
+
+#----Calculate Normalized Difference Green-Red index----
+
+ndgr.vi = function(r, red = 3, green = 2){
+ # Calculate Normalized Difference Green-Red index
+  b_r = r[[red]]
+  b_g = r[[green]]
+  
+  ndgr = (b_g-b_r)/(b_g+b_r)
+  names(ndgr) = 'NDGR'
+  return(ndgr)
+}
+
+#----Calculate Green Chromatic Coordinate----
+
+gcc.vi = function(r, red = 3, green = 2, blue = 1){
+  #Calculate Green Chromatic Coordinate
+  b_r = r[[red]]
+  b_g = r[[green]]
+  b_b = r[[blue]]
+  
+  gcc = b_g/(b_g+b_r+b_b)
+  names(gcc) = 'GCC'
+  return(gcc)
+}
+
+#----Calculate Carotenoid Reflectance Index 550 ----
+
+cri550.vi = function(r, red = 3, green = 2){
+  #Calculate Carotenoid Reflectance Index 550
+  b_r = r[[red]] 
+  b_g = r[[green]]
+  
+  b_r = b_r+1 #add one so that results are not undefined
+  b_g = b_g+1 #add one so that results are not undefined
+  
+  vi = (1/b_r)-(1/b_g)
+  names(vi) = 'CRI550'
+  return(vi)
+}
+
+#----Calculate Green Leaf Index----
+
+gli.vi = function(r, red = 3, green = 2, blue = 1){
+  #Calculate Green Leaf Index
+  b_r = r[[red]]
+  b_g = r[[green]]
+  b_b = r[[blue]]
+  
+  vi = (2*b_g-b_r-b_b)/(2*b_g+b_r+b_b)
+  names(vi) = 'GLI'
+  return(vi)
+}
+
+#----Calculate Coloration Index----
+
+ci.vi = function(r, red = 3, green = 2){
+  #Calculate Coloration Index
+  b_r = r[[red]]
+  b_g = r[[green]]
+  
+  vi = (b_r-b_g)/(b_r+b_g)
+  names(vi) = 'CI'
+  return(vi)
+}
+
+#----Calculate Brightness Index----
+
+bi.vi = function(r, red = 3, green = 2){
+  #Calculate Brightness Index
+  b_r = r[[red]]
+  b_g = r[[green]]
+  
+  vi = sqrt((b_r^2+b_g^2)/2)
+  names(vi) = 'BI'
+  return(vi)
+}
+
+#----Calculate Transformed Vegetation Index----
+
+tvi.vi = function(r, red = 3, green = 2){
+  #Calculate Transformed Vegetation Index
+  b_r = r[[red]]
+  b_g = r[[green]]
+  
+  vi = sqrt(0.5+((b_r-b_g)/(b_r+b_g)))
+  names(vi) = 'TVI'
+  return(vi)
+}
+
+#----Calculate Visible Atmospherically Resistant Index Green----
+
+varig.vi = function(r, red = 3, green = 2, blue = 1){
+  #Calculate Visible Atmospherically Resistant Index Green
+  b_r = r[[red]]
+  b_g = r[[green]]
+  b_b = r[[blue]]
+  
+  vi = (b_r-b_b)/(b_g+b_r-b_b)
+  names(vi) = 'VARIgreen'
+  return(vi)
+}
+
+#----Calculate multiple vegetation indices for a spatraster by providing a list of functions ----
+rast.batch.functions = function(r, fl, rast_out = T, include_input = T, ...){
+  #apply a list of functions - including custom functions - which take the same arguments to a spatraster
+  #the purpose is to calculate multiple vegetation indices with one compact call using custom functions
+  #if rast_out ==T, result will be a spatraster, else result will be a list of spatrasters
+  result = lapply(fl, function(f)f(r,...))
+  
+  if(rast_out==T){ #option to make result a spatraster
+    result = rast(result)
+  }
+  
+  if(include_input == T){
+    result = c(r, result)
+  }
+  
+  return(result)
 }

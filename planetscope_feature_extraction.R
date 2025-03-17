@@ -1,7 +1,7 @@
 library(tidyverse)
 library(terra)
 source('helper_functions.R')
-source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/softmax.R')
+# source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/softmax.R')
 library(future)
 library(future.apply)
 library(glcm)
@@ -10,6 +10,7 @@ library(tools)
 library(jsonify)
 # library(microbenchmark)
 library(RStoolbox)
+library(stars)
 
 #----load data----
 
@@ -53,34 +54,36 @@ dir_string = 'UDMmasked'
 udm_masked_dir = paste0(ps_dir, '/',dir_string)
 dir.check(udm_masked_dir)
 
-indir = ps_dir
+indir = raw_dir
 outdir = udm_masked_dir
 
 rasters = list.files(indir, full.names = T, recursive = T, pattern = '\\.tif$')
+bands = names(rast(rasters[1]))
 
-plan(multisession, workers = 8)
+# plan('multisession', workers = 10)
 
 
-pblapply(1:length(clear_df$id), function(i){
+future_lapply(1:length(clear_df$id), function(i){
   
   id = clear_df$id[i] #get planet id number
   filename = paste0(outdir,'/',id,'_',dir_string,'.tif')
   if(!file.exists(filename)){
     
     #if(clear_df$clear_percent[i] != 100){
-      id_rasters = rasters[str_detect(rasters, id)]
-      udm = rast(id_rasters[str_detect(id_rasters, 'udm')])
-      scene = rast(id_rasters[!str_detect(id_rasters, 'udm')])
-      
-      #apply mask
-      scene_m = mask(scene, is.na(udm[['clear']]))
-      
-      #save file
-      writeRaster(scene_m, filename = filename)
+    id_rasters = rasters[str_detect(rasters, id)]
+    udm = rast(id_rasters[str_detect(id_rasters, 'udm')])
+    scene = rast(id_rasters[!str_detect(id_rasters, 'udm')])
+    
+    #apply mask
+    scene_m = mask(scene, is.na(udm[['clear']]))
+    
+    #save file
+    writeRaster(scene_m, filename = filename)
     #}
   }
+  print(paste0(filename, ' done, ',i,'/',length(clear_df$id)))
 }
-, cl = 'future'
+# , cl = 'future'
 )
 
 #plan(sequential)
@@ -169,42 +172,38 @@ pblapply(1:length(clear_df$id), function(i){
 # plan('sequential')
 
 #----Calculate a bunch of spectral indices----
+
+sf = 65535 #scale factor (max value of 16-bit pixel)
+
 dir_string = 'VegIndices'
 VI_dir = paste0(ps_dir, '/', dir_string)
 dir.check(VI_dir)
 
-# plan('multisession', workers = 12)
+# plan('multisession', workers = 10)
 
 indir = udm_masked_dir
 outdir = VI_dir
 
 rasters = list.files(indir, full.names = T, recursive = T, pattern = '\\.tif')
 
-pblapply(1:nrow(clear_df), function(i){
+future_lapply(1:nrow(clear_df), function(i){
   id = clear_df$id[i]
   filename = paste0(outdir,'/',id,'_',dir_string,'.tif')
   if(!file.exists(filename)){
     scene = rast(rasters[str_detect(rasters, id)])
     
-    #get maximum pixel value iacross all bands to use as scale factor
-    
-    maxes = global(scene,'max',na.rm=T)
-    sf = max(maxes[['max']]) #maximum value across all bands in a scene
-    
-    sf = 65535#maximum theoretical value for a 16-bit pixel
-    
     #calculate a bunch of vegetation indices
     scene_vi = spectralIndices(img = scene, blue = 'blue', green = 'green', red = 'red', nir = 'nir', redEdge1 = 'rededge'
                                ,scaleFactor = sf, skipRefCheck = T)
-    
+
     #save file
     terra::writeRaster(scene_vi, filename = filename)
   }
 }
-, cl = 'future'
+# , cl = 'future'
 )
 
-plan('sequential')
+# plan('sequential')
 
 
 #---- normalize vegetation indices using z-score
@@ -254,6 +253,66 @@ plan('sequential')
 # 
 # l = list.files(DeltaDI_dir, full.names = T)
 # r = rast(l[length(l)-1])
+
+#----Calculate z-scores and softmax based on bands and vegetation indices----
+
+z_dir_string = 'Z-score'
+z_dir = paste0(ps_dir, '/', z_dir_string)
+dir.check(z_dir)
+
+sm_dir_string = 'softmax'
+sm_dir = paste0(ps_dir, '/', sm_dir_string)
+dir.check(sm_dir)
+
+indirs = c(VI_dir, udm_masked_dir)
+rasters = rasters = unlist(lapply(indirs, list.files, full.names = TRUE, recursive = T, pattern = '\\.tif$'))
+
+z_outdir = z_dir
+sm_outdir = sm_dir
+
+plan('multisession', workers = 6)
+
+future_lapply(1:length(clear_df$id), function(i){
+  
+  id = clear_df$id[i]
+  
+  z_filename = paste0(z_outdir,'/',id,'_',z_dir_string,'.tif')
+  sm_filename = paste0(sm_outdir,'/',id,'_',sm_dir_string,'.tif')
+  
+  if(!file.exists(z_filename)|!file.exists(sm_filename)){
+    
+    #load scene
+    r_l = lapply(rasters[str_detect(rasters, id)], rast)
+    scene = rast(r_l)
+    
+    #calculate and save z-score
+    scene_z_l = lapply(scene, z_rast)
+    scene_z = rast(scene_z_l)
+    names(scene_z) = paste0(names(scene),'_',z_dir_string)
+    terra::writeRaster(scene_z, z_filename, overwrite = T)
+    
+    #calculate and save softmax
+    
+    s_l = lapply(1:nlyr(scene), function(i){ #scale the raw bands for use with softmax
+      b = scene[[i]]
+      nom = names(scene)[i]
+      if(nom %in% bands){
+        b = b/sf
+      } else {
+        b 
+      }
+      return(b)
+    })
+    scene_s = rast(s_l)
+    
+    scene_sm = softmax(scene_s, append_name = T)
+    terra::writeRaster(scene_sm, sm_filename, overwrite = T)
+  }
+}
+# ,cl = 'future'
+)
+
+plan('sequential')
 
 
 

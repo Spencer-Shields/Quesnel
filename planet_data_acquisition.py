@@ -10,6 +10,8 @@ import pandas as pd
 import numpy as np
 import matplotlib as plt
 from shapely.geometry import shape
+import planet
+import pathlib
 
 #set working directory to project folder
 wd_path = r"D:\Quesnel\data"
@@ -95,12 +97,15 @@ geometry_filter = {
 instrument_filter = {
     'type': 'StringInFilter',
     'field_name': 'instrument',
-    'config': ['PS2.SD', 'PS2', 'PSB.SD']
+    'config': [
+        # 'PS2.SD', 
+        # 'PS2', 
+        'PSB.SD']
     }
 
 #cloud filter
-min_cloud_proportion = 0
-max_cloud_proportion = 0.05
+min_cloud_proportion = 0.0
+max_cloud_proportion = 0.0
 
 cloud_filter = {
     'type': 'RangeFilter',
@@ -128,7 +133,7 @@ and_filter = {
     'config': [
         date_filter
         , geometry_filter
-        # , instrument_filter
+        , instrument_filter
         , cloud_filter
         ]
     }
@@ -162,10 +167,25 @@ feats = gj['features']
 p(feats)
 print(type(feats))
 
+#%% Aggregate results
+all_features = feats
+next_link = gj['_links']['_next']
+
+while next_link:
+    res = session.get(next_link)
+    gj = res.json()
+    feats = gj['features']
+    all_features.extend(feats)
+    next_link = gj['_links'].get('_next', None)
+
+
+
+# %% Extract metadata from features
 #make simple feature object using PSScenes metadata
-df = pd.DataFrame([feat['properties'] for feat in feats]) #make dataframe of metadata
-df["geometry"] = [shape(feat["geometry"]) for feat in feats]
+df = pd.DataFrame([feat['properties'] for feat in all_features]) #make dataframe of metadata
+df["geometry"] = [shape(feat["geometry"]) for feat in all_features]
 gdf = gpd.GeoDataFrame(df, geometry="geometry")
+gdf['feature_id'] = [feat['id'] for feat in all_features]
 
 
 #number of scenes for each individual satellite (no useful trends)
@@ -185,22 +205,125 @@ aoi_shapely = shape(aoi_json['features'][0]['geometry'])#convert aoi to shapely 
 gdf["aoi_intersection"] = gdf.geometry.intersection(aoi_shapely) #perform intersection
 gdf["aoi_proportion"] = gdf["aoi_intersection"].area / aoi_shapely.area #get intersection area divided by aoi area
 
-aoi_prop_threshold = 0
-gdf_fullcoverage = gdf[gdf['aoi_proportion'] > aoi_prop_threshold] #get scenes which completely contain the AOI
+aoi_prop_threshold = 0.999
+gdf_coverage = gdf[gdf['aoi_proportion'] > aoi_prop_threshold] #get scenes which completely contain the AOI
 
 #get year-month of scenes in gdf_fullcoverage based on 'acquired' column
-gdf_fullcoverage = gdf_fullcoverage.copy()
-gdf_fullcoverage["acquired"] = pd.to_datetime(gdf_fullcoverage["acquired"])
-gdf_fullcoverage['year_month'] = gdf_fullcoverage['acquired'].dt.strftime('%Y-%m')  # Extract YYYY-MM
-gdf_fullcoverage['month'] = gdf_fullcoverage['acquired'].dt.strftime('%m')  # Extract MM
+gdf_coverage = gdf_coverage.copy()
+gdf_coverage["acquired"] = pd.to_datetime(gdf_coverage["acquired"])
+gdf_coverage['year_month'] = gdf_coverage['acquired'].dt.strftime('%Y-%m')  # Extract YYYY-MM
+gdf_coverage['month'] = gdf_coverage['acquired'].dt.strftime('%m')  # Extract MM
 
-year_month_counts = gdf_fullcoverage['year_month'].value_counts().sort_index()
+year_month_counts = gdf_coverage['year_month'].value_counts().sort_index()
 
 #limit to only imagery from march to november (i.e. growing season)
 exclude_months = ['12', '01', '02', '03', '04']
-gdf_gs = gdf_fullcoverage[~gdf_fullcoverage['month'].isin(exclude_months)]
+gdf_gs = gdf_coverage[~gdf_coverage['month'].isin(exclude_months)]
+
+len(gdf_gs)
 
 n_gs = gdf_gs['year_month'].value_counts().sort_index()
-len(n_gs)
+n_gs
 
-# %%
+
+# %% Define order
+
+#get list of asset ids that I want
+
+desired_feat_ids = gdf_gs['feature_id']
+
+orders_url = 'https://api.planet.com/compute/ops/orders/v2' 
+response = requests.get(orders_url, auth=session.auth)
+response
+
+headers = {'content-type': 'application/json'}
+
+request = {  
+   "name":"Quesnel_8b_scenes_harmonized_clipped_fullcoverage_2021to2024",
+   "products":[
+      {  
+         "item_ids": desired_feat_ids.tolist(),
+         "item_type":"PSScene",
+         "product_bundle":"analytic_8b_sr_udm2" #get analytic 8b
+      }
+   ],
+    'tools': [
+        {
+            "reproject": {
+                "projection": "WGS84",
+                "kernel": "cubic"}
+                },
+        {
+            'clip': {
+                'aoi': aoi_geom
+            }
+        },
+        {
+        'harmonize': {
+            'target_sensor' : 'Sentinel-2'
+        }
+    }
+    ]
+}
+
+#%% Place order
+
+#define function for placing an order
+def place_order(request, auth):
+    response = requests.post(orders_url, data=json.dumps(request), auth=auth, headers=headers)
+    print(response)
+    order_id = response.json()['id']
+    print(order_id)
+    order_url = orders_url + '/' + order_id
+    return order_url
+
+# #place the order (uncomment to run)
+# orders_url = place_order(request, session.auth)
+
+#check status of order
+def poll_for_success(order_url, auth, num_loops=30):
+    count = 0
+    while(count < num_loops):
+        count += 1
+        r = requests.get(order_url, auth=session.auth)
+        response = r.json()
+        state = response['state']
+        print(state)
+        end_states = ['success', 'failed', 'partial']
+        if state in end_states:
+            break
+        time.sleep(10)
+        
+poll_for_success(orders_url, session.auth)
+
+#see results
+r = requests.get(orders_url, auth=session.auth)
+response = r.json()
+results = response['_links']['results']
+[r['name'] for r in results]
+
+#%% Download imagery
+
+#define path of directory where imagery will be downloaded to
+download_dir = os.path.join(wd_path, 'planet_scenes', 'raw')
+
+#define function to loop through files and download them
+def download_results(results, download_dir='data', overwrite=False):
+    results_urls = [r['location'] for r in results]
+    results_names = [r['name'] for r in results]
+    print('{} items to download'.format(len(results_urls)))
+    
+    for url, name in zip(results_urls, results_names):
+        path = pathlib.Path(os.path.join(download_dir, name))
+        
+        if overwrite or not path.exists():
+            print('Downloading {} to {}'.format(name, path))
+            r = requests.get(url, allow_redirects=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(r.content)
+        else:
+            print('{} already exists, skipping {}'.format(path, name))
+
+##download the imagery (uncomment to run)
+# download_results(results, download_dir)
