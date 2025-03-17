@@ -28,7 +28,7 @@ r_l = lapply(rast_files,rast) #get rasters
 #----get thinning blocks and aoi----
 ps_dir = 'data/planet_scenes'
 blocks = st_read('data/Quesnel_thinning/12l_12n_bdy.gpkg')
-no_change = st_read('Arc project/NoChangeStands.shp')
+no_change = st_read('Arc project/NoChangeStands_conifer.shp')
 no_change = no_change %>% rename(geom = geometry)
 blocks = rbind(blocks, no_change)
 blocks_p = st_transform(blocks, crs = crs(r_l[[1]]))
@@ -119,6 +119,39 @@ future_lapply(files_list, function(x){
 print('Calculate VegIndices done')
 # stopCluster(cl)
 # plan('sequential')
+
+#----crop data to blocks----
+
+indir = outdir
+rasters = list.files(indir, pattern = '\\.tif$', full.names = T)
+
+clipped_string = 'VegIndices_clipped'
+clipped_dir = paste0(bm_dir, '/', clipped_string)
+dir.check(clipped_dir)
+
+outdir = clipped_dir
+
+lapply(1:nrow(blocks_p), function(i){ #create subdirectories for every block
+  d = paste0(outdir,'/',blocks_p$BLOCKNUM[i])
+  dir.check(d)
+})
+
+pblapply(1:length(rasters), function(i){
+  r_id = basename(file_path_sans_ext(rasters[i]))
+  future_lapply(1:nrow(blocks_p), function(j){
+    block_id = blocks_p$BLOCKNUM[j]
+    filename = paste0(outdir,'/',block_id,'/',r_id)
+    print(paste0('Processing ',filename))
+    if(!file.exists(filename)){
+      r = rast(rasters[i])
+      b = blocks_p[j,]
+      r_c = crop(r,b,mask=T)
+      terra::writeRaster(r_c, filename)
+    }
+  })
+})
+
+
 
 
 
