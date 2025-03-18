@@ -87,13 +87,32 @@ dir.check = function(dir){
   if(!dir.exists(dir)){dir.create(dir)}
 }
 
-#----Calculate disturbance index using Tasseled Cap indices----
-z_rast = function(r, maxcell = Inf){ 
+#----Calculate mean absolute deviation----
+mad = function(x, na.rm = FALSE) {
+  if (na.rm) {
+    x = x[!is.na(x)]  # Remove NA values
+  }
+  mean(abs(x - mean(x)))
+}
+#----Calculate z-score for a single band raster----
+z_rast = function(r, maxcell = Inf, robust = F){ 
   #function for calculating z-scores for a single-band raster
-  g = global(r, c('mean','std'), maxcell = maxcell, na.rm=T)
-  zr = (r-g[['mean']])/g[['std']]
+  #robust = T will do the calculation using the median and mean absolute deviation instead of mean and std
+  if(robust == F){
+    g = global(r, c('mean','std'), maxcell = maxcell, na.rm=T)
+    z = (r-g[['mean']])/g[['std']]
+  } else {
+    g1 = global(r, median, maxcell = maxcell, na.rm=T)
+    g2 = global(r, mad, maxcell = maxcell, na.rm=T)
+    g = cbind(g1,g2)
+    names(g) = c('median', 'mad')
+    z = (r - g[['median']])/g[['mad']]
+  }
+  return(z)
 } 
 
+
+#----Calculate disturbance index using Tasseled Cap indices----
 di_fn <- function(r, znormed = T) {
   #Calculate disturbance index based on Tasseled Cap indices.
   #Make sure that raster stack R has brightness, greenness, and wetness as the first, second, and third bands.
@@ -186,7 +205,7 @@ hue.vi = function(r, red = 3, green = 2, blue = 1, type = 'Escadafal'){
 #----Calculate Normalized Difference Green-Red index----
 
 ndgr.vi = function(r, red = 3, green = 2){
- # Calculate Normalized Difference Green-Red index
+  # Calculate Normalized Difference Green-Red index
   b_r = r[[red]]
   b_g = r[[green]]
   
@@ -301,4 +320,19 @@ rast.batch.functions = function(r, fl, rast_out = T, include_input = T, ...){
   }
   
   return(result)
+}
+
+#----function for choosing which substring in a vector appears in a filepath or other long string----
+find_substring = function(filepath, v, first = T){
+  #given a filepath (or other long string) and a character vector, return the element of the vector which appears in the path
+  #first = T will return the first result if a vector is returned
+  g = sapply(v, function(x)str_detect(filepath, x))
+  if(first == T){g = g[1]}
+  if(!T %in% g){
+    return(NA)
+  } else {
+    i = which(g)
+    a = v[i]
+    return(a)
+  }
 }
