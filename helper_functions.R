@@ -4,7 +4,7 @@ library(RcppArmadillo)
 
 #----define function for plotting lists of rasters----
 
-list_plot = function(l, single_plot = T){
+list_plot = function(l, single_plot = T, col = viridis::viridis(101)){
   #function for plotting list of named single-band rasters
   #rasters must be named
   #single_plot = T makes plots faceted in a grid, otherwise plots will appear in individual windows.
@@ -20,6 +20,7 @@ list_plot = function(l, single_plot = T){
       plot(l[[i]]
            , main = names(l)[i]
            , sub = as.character(substitute(l))
+           , col = col
       )
     }
     par(mfrow = c(1,1))
