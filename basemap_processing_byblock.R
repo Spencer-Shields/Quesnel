@@ -129,41 +129,41 @@ cores = detectCores()
   
   #----mask data using NTEMS forest cover mask----
   
-  indir = outdir
-  rasters = list.files(indir, full.names = T, pattern = '\\.tif$')
-  
-  fc_cropped_string = 'ntemsFC'
-  outdir = paste0(indir, '_',fc_cropped_string)
-  dir.check(outdir)
-  
-  #load NTEMS data
-  ntems_prepped_file = 'data/spencer-ntems/lc_2021_prepped.tif'
-  if(!file.exists(ntems_prepped_file)){
-    ntems_fc = rast("data/spencer-ntems/spencer-lc") %>%
-      project(crs(aoi)) %>% #reproject
-      crop(aoi) #crop to match aoi
-    ntems_fc_cat = as.factor(ntems_fc) #make raster categorical
-    ntems_fc_r = resample(ntems_fc_cat, rast(rasters[1]), method = 'near') #resample to match PS basemaps
-    terra::writeRaster(ntems_fc_r, ntems_prepped_file)
-  }else{
-    ntems_fc_r = rast(ntems_prepped_file)
-  }
-  
-  #make mask
-  forest_classes = c('81','210','220','230') #landcover classes which represent forest cover
-  fc_mask = ifel(ntems_fc_r %in% forest_classes, 1, NA) #assign NA values to non-forest landcover types
-  
-  pblapply(1:length(rasters), function(i){ #not parallelized since spatraster is being passed to function
-    id = basename(rasters[i])
-    filename = paste0(outdir, '/', id)
-    if(!file.exists(filename)){
-      r = rast(rasters[i])
-      r_m = mask(r, fc_mask)
-      terra::writeRaster(r_m, filename)
-    }
-  })
-  
-  print('NTEMS mask done')
+  # indir = outdir
+  # rasters = list.files(indir, full.names = T, pattern = '\\.tif$')
+  # 
+  # fc_cropped_string = 'ntemsFC'
+  # outdir = paste0(indir, '_',fc_cropped_string)
+  # dir.check(outdir)
+  # 
+  # #load NTEMS data
+  # ntems_prepped_file = 'data/spencer-ntems/lc_2021_prepped.tif'
+  # if(!file.exists(ntems_prepped_file)){
+  #   ntems_fc = rast("data/spencer-ntems/spencer-lc") %>%
+  #     project(crs(aoi)) %>% #reproject
+  #     crop(aoi) #crop to match aoi
+  #   ntems_fc_cat = as.factor(ntems_fc) #make raster categorical
+  #   ntems_fc_r = resample(ntems_fc_cat, rast(rasters[1]), method = 'near') #resample to match PS basemaps
+  #   terra::writeRaster(ntems_fc_r, ntems_prepped_file)
+  # }else{
+  #   ntems_fc_r = rast(ntems_prepped_file)
+  # }
+  # 
+  # #make mask
+  # forest_classes = c('81','210','220','230') #landcover classes which represent forest cover
+  # fc_mask = ifel(ntems_fc_r %in% forest_classes, 1, NA) #assign NA values to non-forest landcover types
+  # 
+  # pblapply(1:length(rasters), function(i){ #not parallelized since spatraster is being passed to function
+  #   id = basename(rasters[i])
+  #   filename = paste0(outdir, '/', id)
+  #   if(!file.exists(filename)){
+  #     r = rast(rasters[i])
+  #     r_m = mask(r, fc_mask)
+  #     terra::writeRaster(r_m, filename)
+  #   }
+  # })
+  # 
+  # print('NTEMS mask done')
   
   #----crop data to blocks----
   
@@ -474,7 +474,7 @@ cores = detectCores()
     pblapply(2:length(files_sorted), function(i){ #start at 
       
       f_id = file_path_sans_ext(basename(files[i]))
-      filename = paste0(dz_dir,'/',d_id,'/',f_id,'_delta.tif')
+      filename = paste0(dzr_dir,'/',d_id,'/',f_id,'_delta.tif')
       if(!file.exists(filename)){
         rd = rast(files_sorted[i]) - rast(files_sorted[i-1])
         terra::writeRaster(rd, filename = filename)
@@ -514,15 +514,15 @@ cores = detectCores()
   date_vector = as.character(date_vector)
   date_vector = str_replace_all(date_vector,'-','_')
   
-  #all possible datasets
-  dataset_strings <- str_extract(dirs, "BlockClipped.*")
+  #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
+  dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
   
   #block ids
   block_ids = blocks_p$BLOCKNUM
   
   #----Turn each raster into a dataframe with global statistics----
   
-  data_string = 'Global_Stats_ntemsmasked'
+  data_string = 'Global_Stats_nomask'
   data_filename = paste0(bm_dir,'/',data_string,'.csv')
   
   if(!file.exists(data_filename)){
@@ -569,6 +569,7 @@ cores = detectCores()
  
   #----process combined data----
   results_df = read_csv(data_filename) %>%
+    #reformat dates
     mutate(
       year = str_remove(acquisition_date, '_.*'), 
       month = str_remove(acquisition_date, '.*_')
@@ -577,9 +578,17 @@ cores = detectCores()
     ) %>%
     mutate(julian_day = yday(acquisition_date2)
     ) %>%
+    #modify variable names
     mutate(var_name = str_remove(v1, '_.*')) %>%
     # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
-    filter(var_name != 'max_DN')
+    filter(var_name != 'max_DN') %>%
+    # fix dataset names
+    mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
+    mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
+    mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
+    mutate(dataset = str_remove(dataset, "^_")) %>%
+    mutate(dataset = str_remove(dataset, '/$'))
+  
    
   #----plotting vegetation indices over time----
   
@@ -590,8 +599,8 @@ cores = detectCores()
       "Hue"
       # ,
       # "GCC"
-      # ,       
-      # "NDGR"
+      ,
+      "NDGR"
       # ,
       # "BI",        
       # "CI", "CRI550",   
@@ -600,23 +609,22 @@ cores = detectCores()
     ) #vector of indices to look at
     
     blocks_ = c(
-      "12L_C5",
+      # "12L_C5",
       "12L_D345"
-      ,  "12L_C4",    "12L_C7",    "12L_B8C3",  "12N_T3",    "12N_1X1W",  "12N_V1"
-      ,"NoChange1"
-      ,'NoChange2'
-      ,'NoChange3')
+      # ,  "12L_C4",    "12L_C7",    "12L_B8C3",  "12N_T3",    "12N_1X1W",  "12N_V1"
+      ,"NoChange1.1_conifer", "NoChange1.2_conifer",
+      "NoChange4_conifer",   "NoChange5_conifer",  
+      "NoChange6_conifer",   "NoChange7_conifer")
     
     datasets_ = c(
-      'Z-scoreCalcByBlock_delta'
-      , 'SoftmaxCalcByBlock_delta', 'nonorm-blocks_delta'
+      'Z','Z_delta','Zrobust', 'Zrobust_delta'
     )
     
     months_ = c(
-      # '01','02','03',
-      # '04',
+      '01','02','03',
+      '04',
       '05','06','07','08','09','10','11'
-      # ,'12'
+      ,'12'
     )
     
     harvest_dates_df = tibble(
@@ -637,12 +645,12 @@ cores = detectCores()
     subset_df = results_df %>% 
       filter(var_name %in% indices
              , str_detect(block_id, paste(blocks_, collapse = "|"))
-             , dataset %in% datasets_ 
+             , dataset %in% datasets_
              , month %in% months_)
     
-    ggplot(subset_df, aes(x = acquisition_date2, y = rms, color = block_id)) +
-      geom_point()+
-      geom_line()+
+    ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
+      geom_point(aes(color = block_type))+
+      geom_line(aes(color = block_id))+
       # geom_ribbon(aes(x = acquisition_date, ymin = mean-sds, ymax = mean+sds))+
       scale_x_date(
         date_breaks = "1 year",       # Major tick marks every year
@@ -653,5 +661,12 @@ cores = detectCores()
       geom_vline(xintercept = as.Date('2022-07-01')) +
       ggtitle('Change from previous image')
   }
+  
+}
+
+#----timeseries analysis by thinned vs not thinned pixels ----
+{
+  #----load LiDAR data----
+  lidar_dir = 'data/Quesnel_thinning'
   
 }
