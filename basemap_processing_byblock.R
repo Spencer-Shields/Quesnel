@@ -42,8 +42,8 @@ cores = detectCores()
   aoi = st_read('data/AOI_fullsite_wgs84.kml') %>%
     st_transform(crs = crs(r_l[[1]]))
   
-  # ggRGB(r_l[[1]])+
-  #   geom_sf(data = blocks_p, aes(color = BLOCKNUM))
+  ggRGB(r_l[[1]])+
+    geom_sf(data = blocks_p, aes(color = BLOCKNUM))
   # 
   # ggRGB(r_l[[2]]) +
   #   geom_sf(data = blocks_p, aes(color = BLOCKNUM))
@@ -566,7 +566,7 @@ cores = detectCores()
     
     # plan('sequential')
   }
- 
+  
   #----process combined data----
   results_df = read_csv(data_filename) %>%
     #reformat dates
@@ -589,7 +589,7 @@ cores = detectCores()
     mutate(dataset = str_remove(dataset, "^_")) %>%
     mutate(dataset = str_remove(dataset, '/$'))
   
-   
+  
   #----plotting vegetation indices over time----
   
   {
@@ -666,7 +666,109 @@ cores = detectCores()
 
 #----timeseries analysis by thinned vs not thinned pixels ----
 {
-  #----load LiDAR data----
-  lidar_dir = 'data/Quesnel_thinning'
+  harvest_threshold = -3 #the drop in height (in m) for a pixel to be considered "harvested" 
+  
+  data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
+  data_filename = paste0(bm_dir,'/',data_string,'.csv')
+  
+  if(!file.exists(data_filename)){
+    
+    #----load LiDAR data----
+    lidar_dir = 'data/Quesnel_thinning/chm_change'
+    lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
+    
+    lidar_ids = basename(file_path_sans_ext(lidar_files))
+    lidar_l = pblapply(lidar_files, rast)
+    lidar_l = pblapply(lidar_l, function(x)if(crs(x)!=crs(blocks_p)){project(x, crs(blocks_p))})
+    
+    
+    #----create harvest mask----
+    
+    harvest_masks = pblapply(lidar_l, function(x)ifel(x <= harvest_threshold, 1, 0)) #1==thinned, 0==not thinned
+    names(harvest_masks) = lidar_ids
+    # list_plot(harvest_masks)
+    
+    #----crop masks to harvest blocks----
+    
+    harvest_masks_clipped = pblapply(1:length(harvest_masks), function(i){
+      block = blocks_p[blocks_p$BLOCKNUM == lidar_ids[i],]
+      hm = crop(harvest_masks[[i]], block,mask = T)
+    })
+    names(harvest_masks_clipped) = lidar_ids
+    # list_plot(harvest_masks_clipped)
+    
+    #----mask PS rasters, save data in dataframe----
+    
+    #remove NoChange rasters from list of all files
+    all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
+    
+    # plan('multisession', workers = 8)
+    
+    
+    df_l = pblapply(all_files_thinning, function(x){
+      
+      print(paste('Processing', x)) #uncomment to identify files where processing fails
+      
+      #get raster
+      r = rast(x)
+      
+      #select appropriate mask layer
+      block = find_substring(x, lidar_ids)
+      m = harvest_masks_clipped[[block]]
+      
+      #resample mask to match raster
+      m_rs = resample(m, r, method = 'mode')
+      
+      #calculate global stats for thinning pixels
+      m_rs1 = ifel(m_rs == 1, 1,NA) #make mask for thinning
+      r_m = mask(r, m_rs1)
+      d1 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d1[['block_pixel_stratum']] = 'Thinned'
+      
+      #calculate global stats for thinning pixels
+      m_rs2 = ifel(m_rs == 0, 1,NA) #make mask for thinning
+      r_m = mask(r, m_rs2)
+      d2 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d2[['block_pixel_stratum']] = 'Not_thinned'
+      
+      #total block stats
+      d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d3[['block_pixel_stratum']] = 'Total'
+      
+      #combine thinning, non-thinning, and total stats
+      d = rbind(d1,d2,d3)
+      
+      #get dataset
+      dataset = find_substring(x,dataset_strings)
+      d[['dataset']] = dataset
+      
+      #get block
+      d[['block_id']] = block
+      
+      #get date
+      date_ = find_substring(x, date_vector)
+      d[['acquisition_date']] = date_
+      
+      #filepath
+      d[['file_path']] = x
+      
+      #rownames
+      d[['v1']] = rownames(d)
+      
+      #delta
+      d[['delta']] = str_detect(x, '_delta')
+      
+      return(d)
+    })
+    
+    results_df = bind_rows(df_l)
+    
+    write.csv(results_df, data_filename)
+    
+    # plan('sequential')
+  }
   
 }
+
+
+#save raw pixel values
