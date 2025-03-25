@@ -5,6 +5,7 @@ library(pbapply)
 source('helper_functions.R')
 library(tidyterra)
 source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/check_radiometric_consistency.R')
+library(data.table)
 # library(supercells)
 # library(dbscan)
 
@@ -80,6 +81,74 @@ lapply(1:length(change_rasts_l), function(i){
   filename = paste0(chm_change_dir,'/',chm_common_ids[i],'.tif')
   if(!file.exists(filename)){
     writeRaster(change_rasts_l[[i]], filename)
+  }
+})
+
+
+#----save change validation rasters which are cropped to the blocks, resampled and reprojected to match basemap data----
+
+
+
+#----Look at histograms of difference rasters to establish harvest threshold----
+
+change_rasts_clipped = pblapply(1:length(change_rasts_l), function(i){
+  rast_id = names(change_rasts_l)[i]
+  block = blocks %>% filter(BLOCKNUM == rast_id)
+  clipped_rast = crop(change_rasts_l[[i]], block, mask = T)
+  return(clipped_rast)
+})
+names(change_rasts_clipped) = names(change_rasts_l)
+
+change_df_l = pblapply(1:length(change_rasts_clipped), function(i){
+  d = data.table(
+    vals = values(change_rasts_clipped[[i]])
+    ,
+    block = names(change_rasts_clipped)[i]
+  )
+})
+change_df = data.table::rbindlist(change_df_l)
+
+#run otsu on each raster
+otsu_l = pbsapply(names(change_rasts_clipped), function(x){
+  d = change_df %>%
+    filter(block == x) 
+  t = otsuThresholdCpp(values = d[['vals.Z']], bins = 256)
+  })
+
+change_df = change_df %>% 
+  left_join(data.frame(block = names(otsu_l), otsu_threshold = otsu_l), by = 'block')
+
+ggplot(data = change_df)+
+  geom_density(aes(x = vals.Z))+
+  geom_vline(aes(xintercept = otsu_threshold, linetype = 'Otsu threshold'))+
+  facet_grid(vars(block))
+
+#----save change validation rasters which are cropped to the blocks, resampled and reprojected to match basemap data----
+
+#get first file from each subdirectory so that there's one planetscope raster for each thinning block
+bm_dir = 'data/planet_basemaps/global_monthly/CroppedMosaics_Indices_BlockClipped'
+bm_subdirs = list.dirs(bm_dir)
+bm_subdirs = bm_subdirs[bm_subdirs != bm_dir]
+bm_subdirs = bm_subdirs[!str_detect(bm_subdirs, 'NoChange')]
+bm_rasts = lapply(bm_subdirs, function(x){
+  fl = list.files(x, full.names = T)
+  r = rast(fl[1])
+  return(r)
+})
+bm_ids = basename(bm_subdirs)
+names(bm_rasts) = bm_ids
+
+chm_change_dir_bm = paste0(chm_change_dir, '_basemap') #make output directory
+dir.check(chm_change_dir_bm)
+
+pblapply(1:length(change_rasts_clipped), function(i){
+  n = names(change_rasts_clipped)[i]
+  filename = paste0(chm_change_dir_bm,'/',n, '.tif')
+  if(!file.exists(filename)){
+    chm = change_rasts_clipped[[n]]
+    ps = bm_rasts[[n]]
+    chm_p = project(chm, ps)
+    writeRaster(chm_p, filename)
   }
 })
 
