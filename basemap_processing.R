@@ -9,6 +9,7 @@ library(future)
 library(future.apply)
 library(tidyterra)
 library(Rcpp)
+library(tictoc)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
@@ -671,7 +672,7 @@ cores = detectCores()
 
 #----timeseries analysis by block and by thinned vs not thinned pixels ----
 {
-  harvest_threshold = -3 #the drop in height (in m) for a pixel to be considered "harvested" 
+  harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". 5.2 = mean Otsu threshold 
   
   data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
   data_filename = paste0(bm_dir,'/',data_string,'.csv')
@@ -683,10 +684,30 @@ cores = detectCores()
     lidar_dir = 'data/Quesnel_thinning/chm_change'
     lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
     
+    
     lidar_ids = basename(file_path_sans_ext(lidar_files))
+    
+    tic()
     lidar_l = pblapply(lidar_files, rast)
     lidar_l = pblapply(lidar_l, function(x)if(crs(x)!=crs(blocks_p)){project(x, crs(blocks_p))})
+    toc()
     
+    # tic()
+    # plan('multisession', workers = 8)
+    # lidar_l = future_lapply(lidar_files, function(x){
+    #   r = rast(x)
+    #   if(crs(r)!=crs(blocks_p)){
+    #     r = project(r, crs(blocks_p))
+    #   }
+    #   return(r)
+    # }
+    # # ,cl = 'future'
+    # )
+    # lidar_l_wrapped = lapply(lidar_l, wrap)
+    # plan('sequential')
+    # 
+    # lidar_l = lapply(lidar_l_wrapped, unwrap)
+    # toc()
     
     #----create harvest mask----
     
@@ -739,19 +760,21 @@ cores = detectCores()
     #remove NoChange rasters from list of all files
     all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
     
-    # plan('multisession', workers = 10)
+    #wrap masks for parallelization
+    harvest_masks_clipped_wrapped = lapply(harvest_masks_clipped, terra::wrap)
     
+    plan('multisession', workers = 10)
     
     df_l = pblapply(all_files_thinning, function(x){
       
-      print(paste('Processing', x)) #uncomment to identify files where processing fails
+      # print(paste('Processing', x)) #uncomment to identify files where processing fails
       
       #get raster
       r = rast(x)
       
       #select appropriate mask layer
       block = find_substring(x, lidar_ids)
-      m = harvest_masks_clipped[[block]]
+      m = unwrap(harvest_masks_clipped_wrapped[[block]])
       
       #resample mask to match raster
       m_rs = resample(m, r, method = 'mode')
@@ -799,7 +822,9 @@ cores = detectCores()
       d[['delta']] = str_detect(x, '_delta')
       
       return(d)
-    })
+    }
+    ,cl = 'future'
+    )
     
     results_df = bind_rows(df_l)
     
@@ -851,12 +876,193 @@ cores = detectCores()
               min_sd = min(std),
               mean_sd = mean(std))
   
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  #----timeseries analysis by block and by thinned vs not thinned pixels ----
+  {
+    tic()
+    harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
+    
+    data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
+    data_filename = paste0(bm_dir,'/',data_string,'.csv')
+    
+    #run if summary data file does not exist
+    if(!file.exists(data_filename)){
+      
+      #----load LiDAR data----
+      lidar_dir = 'data/Quesnel_thinning/chm_change_basemap'
+      lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
+      lidar_ids = basename(file_path_sans_ext(lidar_files))
+      names(lidar_files) = lidar_ids
+    
+      #----set up for processing----
+      
+      #get list of all files
+      dirs = c(
+        #change data
+        dz_dir,
+        dzr_dir,
+        dsm_dir,
+        dn_dir
+        #no-change data
+        ,z_dir
+        ,zr_dir
+        ,sm_dir
+        ,nonorm_dir
+      )
+      
+      all_files <- unlist(sapply(dirs, list.files, pattern = "\\.tif$", full.names = TRUE, recursive = TRUE))
+      
+      #get vector of all possible dates in timeseries
+      start_date <- as.Date("2021-01-01")
+      end_date <- as.Date("2024-12-31")
+      date_vector <- seq.Date(from = start_date, to = end_date, by = "month")
+      date_vector <- format(date_vector, "%Y-%m")
+      date_vector = as.character(date_vector)
+      date_vector = str_replace_all(date_vector,'-','_')
+      
+      #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
+      dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
+      
+      #block ids
+      block_ids = blocks_p$BLOCKNUM
+      
+      #----mask PS rasters, save global values in dataframe----
+      
+      #remove NoChange rasters from list of all files
+      all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
+      
+      plan('multisession', workers = 10)
+      
+      df_l = pblapply(all_files_thinning, function(x){
+        
+        # print(paste('Processing', x)) #uncomment to identify files where processing fails
+        
+        #get raster
+        r = rast(x)
+        
+        #select appropriate lidar layer, create binary thinning mask
+        block = find_substring(x, lidar_ids)
+        lid_file = lidar_files[block]
+        lid_r = rast(lid_file)
+        m = ifel(lid_r <= harvest_threshold, 1, 0)
+        
+        #calculate global stats for thinning pixels
+        m1 = ifel(m == 1, 1,NA) #make mask for thinning
+        r_m = mask(r, m1)
+        d1 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d1[['block_pixel_stratum']] = 'Thinned'
+        d1[['v1']] = rownames(d1)
+        
+        #calculate global stats for thinning pixels
+        m2 = ifel(m == 0, 1,NA) #make mask for thinning
+        r_m = mask(r, m2)
+        d2 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d2[['block_pixel_stratum']] = 'Not_thinned'
+        d2[['v1']] = rownames(d2)
+        
+        #total block stats
+        d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d3[['block_pixel_stratum']] = 'Total'
+        d3[['v1']] = rownames(d3)
+        
+        #combine thinning, non-thinning, and total stats
+        d = rbind(d1,d2,d3)
+        
+        #get dataset
+        dataset = find_substring(x,dataset_strings)
+        d[['dataset']] = dataset
+        
+        #get block
+        d[['block_id']] = block
+        
+        #get date
+        date_ = find_substring(x, date_vector)
+        d[['acquisition_date']] = date_
+        
+        #filepath
+        d[['file_path']] = x
+        
+        # #rownames
+        # d[['v1']] = rownames(d)
+        
+        #delta
+        d[['delta']] = str_detect(x, '_delta')
+        
+        return(d)
+      }
+      ,cl = 'future'
+      )
+      
+      results_df = bind_rows(df_l)
+      
+      write.csv(results_df, data_filename)
+      
+      plan('sequential')
+      toc()
+    }
+    #----process combined data----
+    results_df = read_csv(data_filename) %>%
+      #reformat dates
+      mutate(
+        year = str_remove(acquisition_date, '_.*'), 
+        month = str_remove(acquisition_date, '.*_')
+      ) %>%
+      mutate(acquisition_date2 = as.Date(paste0(year,'-',month,'-01'))
+      ) %>%
+      mutate(julian_day = yday(acquisition_date2)
+      ) %>%
+      #modify variable names
+      mutate(var_name = str_remove(v1, '_.*')) %>%
+      # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
+      filter(var_name != 'max_DN') %>%
+      # fix dataset names
+      mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
+      mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
+      mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
+      mutate(dataset = str_remove(dataset, "^_")) %>%
+      mutate(dataset = str_remove(dataset, '/$'))
+    
+    
+    
+    #----check results----
+    results_summ = results_df %>%
+      group_by(dataset, block_pixel_stratum, block_id, var_name) %>%
+      summarise(count = n()) %>%
+      ungroup()%>%
+      complete(dataset, block_pixel_stratum, block_id, var_name, fill = list(count = 0))
+    # view(results_summ)
+    
+    #----rescale variable values so that they can be plotted together----
+    
+    #get min and max means and standard deviations
+    vars_summ = results_df %>%
+      group_by(var_name) %>%
+      summarise(max_mean = max(mean),
+                min_mean = min(mean),
+                mean_mean = mean(mean),
+                max_sd = max(std),
+                min_sd = min(std),
+                mean_sd = mean(std))
+  
   #----plotting vegetation indices over time----
   
   {
     indices = c(
-      # "blue", "green", "red"
-      # ,
+      "blue", "green", "red"
+      ,
       "Hue"
       ,
       "GCC"
