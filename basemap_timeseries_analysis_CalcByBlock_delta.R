@@ -45,6 +45,7 @@ date_vector = str_replace_all(date_vector,'-','_')
 # }
 
 find_substring = function(filepath, v){
+  #given a filepath (or other long string) and a character vector, return the element of the vector which appears in the path
   g = sapply(v, function(x)str_detect(filepath, x))
   if(!T %in% g){
     return(NA)
