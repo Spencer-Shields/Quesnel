@@ -8,6 +8,7 @@ library(parallel)
 library(future)
 library(future.apply)
 library(tidyterra)
+library(Rcpp)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
@@ -666,7 +667,7 @@ cores = detectCores()
 
 #----timeseries analysis by thinned vs not thinned pixels ----
 {
-  harvest_threshold = -3 #the drop in height (in m) for a pixel to be considered "harvested" 
+  harvest_threshold = -1 #the drop in height (in m) for a pixel to be considered "harvested" 
   
   data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
   data_filename = paste0(bm_dir,'/',data_string,'.csv')
@@ -768,7 +769,124 @@ cores = detectCores()
     # plan('sequential')
   }
   
+  #----process combined data----
+  results_df = read_csv(data_filename) %>%
+    #reformat dates
+    mutate(
+      year = str_remove(acquisition_date, '_.*'), 
+      month = str_remove(acquisition_date, '.*_')
+    ) %>%
+    mutate(acquisition_date2 = as.Date(paste0(year,'-',month,'-01'))
+    ) %>%
+    mutate(julian_day = yday(acquisition_date2)
+    ) %>%
+    #modify variable names
+    mutate(var_name = str_remove(v1, '_.*')) %>%
+    # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
+    filter(var_name != 'max_DN') %>%
+    # fix dataset names
+    mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
+    mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
+    mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
+    mutate(dataset = str_remove(dataset, "^_")) %>%
+    mutate(dataset = str_remove(dataset, '/$'))
+  
+  
+  
+  #----plotting vegetation indices over time----
+  
+  {
+    indices = c(
+      # "blue", "green", "red"
+      # ,
+      # "Hue"
+      # ,
+      "GCC"
+      # ,
+      # "NDGR"
+      # ,
+      # "BI"
+      # ,        
+      # "CI"
+      # , 
+      # "CRI550"
+      # ,   
+      # "GLI"
+      # , 
+      # "TVI"
+      # , 
+      # "VARIgreen"
+    ) #vector of indices to look at
+    
+    blocks_ = c(
+      "12L_C5"
+      ,
+      "12L_D345"
+      ,  "12L_C4",    "12L_C7",    "12L_B8C3",  "12N_T3",    "12N_1X1W",  "12N_V1"
+      # ,"NoChange1.1_conifer", "NoChange1.2_conifer",
+      # "NoChange4_conifer",   "NoChange5_conifer",  
+      # "NoChange6_conifer",   "NoChange7_conifer"
+      )
+    
+    datasets_ = c(
+      'Z'
+      # ,
+      # 'Z_delta',
+      # 'Zrobust'
+      # , 'Zrobust_delta'
+    )
+    
+    months_ = c(
+      '01','02','03',
+      '04',
+      '05','06','07','08','09','10','11'
+      ,'12'
+    )
+    
+    harvest_dates_df = tibble(
+      block_id = blocks_p$BLOCKNUM[!str_detect(blocks_p$BLOCKNUM, 'NoChange')],
+      harvest_month = c('2023-02'
+                        ,'2022-07'
+                        ,'2023-02'
+                        ,'2023-02'
+                        ,'2023-02'
+                        ,'2023-02'
+                        ,'2024-03'
+                        ,'2024-03')
+      ,harvest_note = c('-','-','-','-','-','partial, complete 2023-03','-','partial, complete 2024-04')
+    )
+    
+    
+    
+    subset_df = results_df %>% 
+      filter(var_name %in% indices
+             , str_detect(block_id, paste(blocks_, collapse = "|"))
+             , dataset %in% datasets_
+             , month %in% months_) %>%
+      left_join(harvest_dates_df %>% mutate(harvest_date = as.Date(paste0(harvest_month,'-01'))))
+    
+    ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
+      geom_point(aes(color = block_pixel_stratum))+
+      geom_line(aes(color = block_pixel_stratum))+
+      geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+      # geom_ribbon(aes(x = acquisition_date, ymin = mean-sds, ymax = mean+sds))+
+      scale_x_date(
+        date_breaks = "1 year",       # Major tick marks every year
+        date_labels = "%Y %m",           # Year labels on major ticks
+        date_minor_breaks = "1 month" # Minor tick marks every month
+      )+
+      facet_grid(rows = vars(block_id), cols = vars(dataset), scales = 'free') +
+      # geom_vline(xintercept = as.Date('2022-07-01')) + #12L_D345
+      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #12L_C4, 12L_C5
+      ggtitle(unique(subset_df$var_name))
+  }
 }
+
+
+
+
+
+
 
 
 #save raw pixel values

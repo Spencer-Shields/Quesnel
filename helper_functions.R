@@ -1,6 +1,6 @@
-#helper functions
-library(Rcpp)
-library(RcppArmadillo)
+# #helper functions
+# library(Rcpp)
+# library(RcppArmadillo)
 
 #----define function for plotting lists of rasters----
 
