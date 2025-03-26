@@ -10,6 +10,8 @@ library(future.apply)
 library(tidyterra)
 library(Rcpp)
 library(tictoc)
+library(arrow)
+library(data.table)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
@@ -675,7 +677,7 @@ cores = detectCores()
 {
   harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
   
-  data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
+  data_string = paste0('GlobalStats_RawValues_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
   data_filename = paste0(bm_dir,'/',data_string,'.csv')
   
   #run if summary data file does not exist
@@ -837,11 +839,10 @@ cores = detectCores()
               mean_sd = mean(std))
   
   #----plotting vegetation indices over time----
-  
-  {
+    {
     indices = c(
-      "blue", "green", "red"
-      ,
+      # "blue", "green", "red"
+      # ,
       "Hue"
       ,
       "GCC"
@@ -849,10 +850,10 @@ cores = detectCores()
       "NDGR"
       ,
       "BI"
-      ,
-      "CI", "CRI550",
-      "GLI", "TVI"
-      , "VARIgreen"
+      # ,
+      # "CI", "CRI550",
+      # "GLI", "TVI"
+      # , "VARIgreen"
     ) #vector of indices to look at
     
     blocks_ = c(
@@ -899,13 +900,14 @@ cores = detectCores()
       ,harvest_note = c('-','-','-','-','-','partial, complete 2023-03','-','partial, complete 2024-04')
     )
     
-    
+    pixel_stratum = c('Not_thinned', 'Thinned')
     
     subset_df = results_df %>% 
       filter(var_name %in% indices
              , str_detect(block_id, paste(blocks_, collapse = "|"))
              , dataset %in% datasets_
-             , month %in% months_) %>%
+             , month %in% months_
+             , block_pixel_stratum %in% pixel_stratum) %>%
       left_join(harvest_dates_df %>% mutate(harvest_date = as.Date(paste0(harvest_month,'-01'))))
     
     ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
@@ -925,8 +927,16 @@ cores = detectCores()
   }
 }
 
-#----save raw pixel values in a dataframe with lidar CHM
+#----timeseries analysis using raw pixel values
 {
+  data_filename = paste0('data/planetscope_basemaps/global_monthly/RawBasemapValues_withCHM.parquet')
+  if(!file.exists(data_filename)){
+  #----set up for processing----
+  #load LiDAR data
+  lidar_dir = 'data/Quesnel_thinning/chm_change_basemap'
+  lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
+  lidar_ids = basename(file_path_sans_ext(lidar_files))
+  names(lidar_files) = lidar_ids
   #get list of all files
   dirs = c(
     #change data
@@ -957,7 +967,7 @@ cores = detectCores()
   #block ids
   block_ids = blocks_p$BLOCKNUM
   
-  #----mask PS rasters, save global values in dataframe----
+  #----combine planetscope raster stacks with canopy height, save raw pixel values in giant data table----
   
   #remove NoChange rasters from list of all files
   all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
@@ -975,29 +985,18 @@ cores = detectCores()
     block = find_substring(x, lidar_ids)
     lid_file = lidar_files[block]
     lid_r = rast(lid_file)
-    m = ifel(lid_r <= harvest_threshold, 1, 0)
+    names(lid_r) = 'CHM_change'
     
-    #calculate global stats for thinning pixels
-    m1 = ifel(m == 1, 1,NA) #make mask for thinning
-    r_m = mask(r, m1)
-    d1 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-    d1[['block_pixel_stratum']] = 'Thinned'
-    d1[['v1']] = rownames(d1)
+    #append chm to planetscope stack
+    r_c = c(r, lid_r)
     
-    #calculate global stats for thinning pixels
-    m2 = ifel(m == 0, 1,NA) #make mask for thinning
-    r_m = mask(r, m2)
-    d2 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-    d2[['block_pixel_stratum']] = 'Not_thinned'
-    d2[['v1']] = rownames(d2)
+    #extract values, convert to data.table
+    v = values(r_c, dataframe=T)
+    d = as.data.table(v)
     
-    #total block stats
-    d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-    d3[['block_pixel_stratum']] = 'Total'
-    d3[['v1']] = rownames(d3)
-    
-    #combine thinning, non-thinning, and total stats
-    d = rbind(d1,d2,d3)
+    #assign id to each pixel
+    id = 1:nrow(d)
+    d[['id']] = id
     
     #get dataset
     dataset = find_substring(x,dataset_strings)
@@ -1013,9 +1012,6 @@ cores = detectCores()
     #filepath
     d[['file_path']] = x
     
-    # #rownames
-    # d[['v1']] = rownames(d)
-    
     #delta
     d[['delta']] = str_detect(x, '_delta')
     
@@ -1024,10 +1020,37 @@ cores = detectCores()
   ,cl = 'future'
   )
   
-  results_df = bind_rows(df_l)
+  results2_df = rbindlist(df_l)
   
-  write.csv(results_df, data_filename)
+  write_parquet(results2_df, data_filename)
   
   plan('sequential')
+  }
+  #----load and clean raw data----
+  results2_df = read_parquet(data_filename) 
+  # results2_df = as.data.table(results2_df) 
+  results2_df = results2_df %>%
+    #reformat dates
+    mutate(
+      year = str_remove(acquisition_date, '_.*'), 
+      month = str_remove(acquisition_date, '.*_')
+    ) %>%
+    mutate(acquisition_date2 = as.Date(paste0(year,'-',month,'-01'))
+    ) %>%
+    mutate(julian_day = yday(acquisition_date2)
+    ) %>%
+    #modify variable names
+    mutate(var_name = str_remove(v1, '_.*')) %>%
+    # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
+    filter(var_name != 'max_DN') %>%
+    # fix dataset names
+    mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
+    mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
+    mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
+    mutate(dataset = str_remove(dataset, "^_")) %>%
+    mutate(dataset = str_remove(dataset, '/$'))
+  
+  #----test if there's a significant difference between thinning and not thinning for each block and each date----
+  
 }
 
