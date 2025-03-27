@@ -1013,22 +1013,37 @@ cores = detectCores()
   ps_feats = all_cols[!all_cols %in% non_ps_cols]
   ps_feats = ps_feats[ps_feats != 'VARIgreen'] #remove this index since it is undefined for many dates
   
-  acquisition_date <- results2_df %>%
-    select(acquisition_date) %>%
-    collect() %>%
-    unique() %>%
-    pull(acquisition_date)  # Extract as a vector
+  # acquisition_date <- results2_df %>%
+  #   select(acquisition_date) %>%
+  #   collect() %>%
+  #   unique() %>%
+  #   pull(acquisition_date)  # Extract as a vector
+  # 
+  # dataset <- results2_df %>%
+  #   select(dataset) %>%
+  #   collect() %>%
+  #   unique() %>%
+  #   pull(dataset)
+  # 
+  # block_id <- results2_df %>%
+  #   select(block_id) %>%
+  #   collect() %>%
+  #   unique() %>%
+  #   pull(block_id)
+  # 
+  # statistical_significance_summ = CJ(
+  #   var_name = ps_feats,
+  #   acquisition_date = acquisition_date,
+  #   dataset = dataset,
+  #   block_id = block_id)
   
-  dataset <- results2_df %>%
-    select(dataset) %>%
-    collect() %>%
-    unique() %>%
-    pull(dataset)
-  
-  statistical_significance_summ = CJ(
-    var_name = ps_feats,
-    acquisition_date = acquisition_date,
-    dataset = dataset)
+  #make dataframe with every combination of block_id, dataset, acquisition_date, and var_name
+  statistical_significance_summ = results2_df |>
+    select(acquisition_date, dataset, block_id) |>
+    distinct() |>
+    collect() |>
+    crossing(var_name = ps_feats) |>
+    filter(var_name != 'VARIgreen')
   
   harvest_threshold = -5.2 #mean Otsu's threshold applied to the change in CHM layers
   
@@ -1050,7 +1065,8 @@ cores = detectCores()
     
     sub_df = results2_df |>
       filter(dataset == statistical_significance_summ$dataset[i],
-             acquisition_date == statistical_significance_summ$acquisition_date[i]) |>
+             acquisition_date == statistical_significance_summ$acquisition_date[i],
+             block_id == statistical_significance_summ$block_id[i]) |>
       mutate(thinned = case_when(
         CHM_change <= harvest_threshold ~ 'Thinned',
         TRUE ~ 'Not_thinned'
@@ -1144,4 +1160,8 @@ cores = detectCores()
   
   #filter out NAs
   statistical_significance_summ = statistical_significance_summ[!is.na(difference_p)]
+  
+  #----join results with results_df (ie global stats for thinning vs not-thinning by block) ----
+  
+  results3_df = 
 }
