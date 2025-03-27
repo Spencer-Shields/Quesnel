@@ -12,6 +12,8 @@ library(Rcpp)
 library(tictoc)
 library(arrow)
 library(data.table)
+library(car)
+library(nortest)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
@@ -129,49 +131,6 @@ cores = detectCores()
     }
   })
   
-  # print('Calculate VegIndices done')
-  # stopCluster(cl)
-  # plan('sequential')
-  
-  
-  #----mask data using NTEMS forest cover mask (commented out, not recommended----
-  ##this step removes a giant portion of pixels from each thinning block. Therefore, it's not recommended.
-  
-  # indir = outdir
-  # rasters = list.files(indir, full.names = T, pattern = '\\.tif$')
-  # 
-  # fc_cropped_string = 'ntemsFC'
-  # outdir = paste0(indir, '_',fc_cropped_string)
-  # dir.check(outdir)
-  # 
-  # #load NTEMS data
-  # ntems_prepped_file = 'data/spencer-ntems/lc_2021_prepped.tif'
-  # if(!file.exists(ntems_prepped_file)){
-  #   ntems_fc = rast("data/spencer-ntems/spencer-lc") %>%
-  #     project(crs(aoi)) %>% #reproject
-  #     crop(aoi) #crop to match aoi
-  #   ntems_fc_cat = as.factor(ntems_fc) #make raster categorical
-  #   ntems_fc_r = resample(ntems_fc_cat, rast(rasters[1]), method = 'near') #resample to match PS basemaps
-  #   terra::writeRaster(ntems_fc_r, ntems_prepped_file)
-  # }else{
-  #   ntems_fc_r = rast(ntems_prepped_file)
-  # }
-  # 
-  # #make mask
-  # forest_classes = c('81','210','220','230') #landcover classes which represent forest cover
-  # fc_mask = ifel(ntems_fc_r %in% forest_classes, 1, NA) #assign NA values to non-forest landcover types
-  # 
-  # pblapply(1:length(rasters), function(i){ #not parallelized since spatraster is being passed to function
-  #   id = basename(rasters[i])
-  #   filename = paste0(outdir, '/', id)
-  #   if(!file.exists(filename)){
-  #     r = rast(rasters[i])
-  #     r_m = mask(r, fc_mask)
-  #     terra::writeRaster(r_m, filename)
-  #   }
-  # })
-  # 
-  # print('NTEMS mask done')
   
   #----crop data to blocks----
   
@@ -255,7 +214,7 @@ cores = detectCores()
       #calculate and save z-score
       scene_z_l = lapply(scene, z_rast)
       scene_z = rast(scene_z_l)
-      names(scene_z) = paste0(names(scene),'_',z_dir_string)
+      # names(scene_z) = paste0(names(scene),'_',z_dir_string)
       terra::writeRaster(scene_z, filename, overwrite = T)
     }
   })
@@ -272,7 +231,7 @@ cores = detectCores()
       #calculate and save robust z-score
       scene_z_l = lapply(scene, function(x)z_rast(x, robust = T))
       scene_z = rast(scene_z_l)
-      names(scene_z) = paste0(names(scene),'_',zr_dir_string)
+      # names(scene_z) = paste0(names(scene),'_',zr_dir_string)
       terra::writeRaster(scene_z, filename, overwrite = T)
     }
   })
@@ -300,7 +259,7 @@ cores = detectCores()
       })
       scene_s = rast(s_l)
       
-      scene_sm = softmax(scene_s, append_name = T)
+      scene_sm = softmax(scene_s, append_name = F)
       terra::writeRaster(scene_sm, filename, overwrite = T)
     }
   })
@@ -672,12 +631,11 @@ cores = detectCores()
   
 }
 
-
 #----timeseries analysis by block and by thinned vs not thinned pixels
 {
   harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
   
-  data_string = paste0('GlobalStats_RawValues_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
+  data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
   data_filename = paste0(bm_dir,'/',data_string,'.csv')
   
   #run if summary data file does not exist
@@ -839,7 +797,7 @@ cores = detectCores()
               mean_sd = mean(std))
   
   #----plotting vegetation indices over time----
-    {
+  {
     indices = c(
       # "blue", "green", "red"
       # ,
@@ -929,128 +887,261 @@ cores = detectCores()
 
 #----timeseries analysis using raw pixel values
 {
-  data_filename = paste0('data/planetscope_basemaps/global_monthly/RawBasemapValues_withCHM.parquet')
+  data_string = 'RawBasemapValues_withCHM_cleaned.parquet'
+  data_filename = paste0(bm_dir,'/',data_string)
   if(!file.exists(data_filename)){
-  #----set up for processing----
-  #load LiDAR data
-  lidar_dir = 'data/Quesnel_thinning/chm_change_basemap'
-  lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
-  lidar_ids = basename(file_path_sans_ext(lidar_files))
-  names(lidar_files) = lidar_ids
-  #get list of all files
-  dirs = c(
-    #change data
-    dz_dir,
-    dzr_dir,
-    dsm_dir,
-    dn_dir
-    #no-change data
-    ,z_dir
-    ,zr_dir
-    ,sm_dir
-    ,nonorm_dir
-  )
-  
-  all_files <- unlist(sapply(dirs, list.files, pattern = "\\.tif$", full.names = TRUE, recursive = TRUE))
-  
-  #get vector of all possible dates in timeseries
-  start_date <- as.Date("2021-01-01")
-  end_date <- as.Date("2024-12-31")
-  date_vector <- seq.Date(from = start_date, to = end_date, by = "month")
-  date_vector <- format(date_vector, "%Y-%m")
-  date_vector = as.character(date_vector)
-  date_vector = str_replace_all(date_vector,'-','_')
-  
-  #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
-  dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
-  
-  #block ids
-  block_ids = blocks_p$BLOCKNUM
-  
-  #----combine planetscope raster stacks with canopy height, save raw pixel values in giant data table----
-  
-  #remove NoChange rasters from list of all files
-  all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
-  
-  plan('multisession', workers = 10)
-  
-  df_l = pblapply(all_files_thinning, function(x){
+    #----set up for processing----
+    #load LiDAR data
+    lidar_dir = 'data/Quesnel_thinning/chm_change_basemap'
+    lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
+    lidar_ids = basename(file_path_sans_ext(lidar_files))
+    names(lidar_files) = lidar_ids
+    #get list of all files
+    dirs = c(
+      #change data
+      dz_dir,
+      dzr_dir,
+      dsm_dir,
+      dn_dir
+      #no-change data
+      ,z_dir
+      ,zr_dir
+      ,sm_dir
+      ,nonorm_dir
+    )
     
-    # print(paste('Processing', x)) #uncomment to identify files where processing fails
+    all_files <- unlist(sapply(dirs, list.files, pattern = "\\.tif$", full.names = TRUE, recursive = TRUE))
     
-    #get raster
-    r = rast(x)
+    #get vector of all possible dates in timeseries
+    start_date <- as.Date("2021-01-01")
+    end_date <- as.Date("2024-12-31")
+    date_vector <- seq.Date(from = start_date, to = end_date, by = "month")
+    date_vector <- format(date_vector, "%Y-%m")
+    date_vector = as.character(date_vector)
+    date_vector = str_replace_all(date_vector,'-','_')
     
-    #select appropriate lidar layer, create binary thinning mask
-    block = find_substring(x, lidar_ids)
-    lid_file = lidar_files[block]
-    lid_r = rast(lid_file)
-    names(lid_r) = 'CHM_change'
+    #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
+    dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
     
-    #append chm to planetscope stack
-    r_c = c(r, lid_r)
+    #block ids
+    block_ids = blocks_p$BLOCKNUM
     
-    #extract values, convert to data.table
-    v = values(r_c, dataframe=T)
-    d = as.data.table(v)
+    #----combine planetscope raster stacks with canopy height, save raw pixel values in giant data table----
     
-    #assign id to each pixel
-    id = 1:nrow(d)
-    d[['id']] = id
+    #remove NoChange rasters from list of all files
+    all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
     
-    #get dataset
-    dataset = find_substring(x,dataset_strings)
-    d[['dataset']] = dataset
+    plan('multisession', workers = 10)
     
-    #get block
-    d[['block_id']] = block
+    df_l = pblapply(all_files_thinning, function(x){
+      
+      # print(paste('Processing', x)) #uncomment to identify files where processing fails
+      
+      #get raster
+      r = rast(x)
+      
+      #select appropriate lidar layer, create binary thinning mask
+      block = find_substring(x, lidar_ids)
+      lid_file = lidar_files[block]
+      lid_r = rast(lid_file)
+      names(lid_r) = 'CHM_change'
+      
+      #append chm to planetscope stack
+      r_c = c(r, lid_r)
+      
+      #extract values, convert to data.table
+      v = values(r_c, dataframe=T)
+      d = setDT(v)
+      
+      # Remove 'max_DN' column (in-place)
+      d[, max_DN := NULL]
+      
+      # Assign 'id' to each pixel (efficient with data.table)
+      d[, id := .I]
+      
+      # Get 'dataset' with string manipulations in one step
+      d[, dataset := find_substring(x, dataset_strings)]
+      d[, dataset := ifelse(str_detect(dataset, 'SM|Z'), dataset, paste0('Non-normalized', dataset))]
+      d[, dataset := str_replace(dataset, 'BlockClipped', '')]
+      d[, dataset := str_remove(dataset, "^_")]
+      d[, dataset := str_remove(dataset, '/$')]
+      
+      # Assign 'block_id' directly (assuming 'block' is a pre-defined vector)
+      d[, block_id := block]
+      
+      # Get 'acquisition_date' with string manipulations and conversion to Date
+      d[, acquisition_date := find_substring(x, date_vector)]
+      d[, acquisition_date := str_replace(acquisition_date, '_', '-')]
+      d[, acquisition_date := paste0(acquisition_date, '-01')]
+      d[, acquisition_date := as.Date(acquisition_date)]
+      
+      # Calculate Julian day and assign it
+      d[, julian_day := yday(acquisition_date)]
+      
+      # d = d |>
+      #   pivot_longer(cols = ps_feats, names_to = 'var_name', values_to = 'value')
+      
+      return(d)
+    }
+    ,cl = 'future'
+    )
     
-    #get date
-    date_ = find_substring(x, date_vector)
-    d[['acquisition_date']] = date_
+    results2_df = rbindlist(df_l)
     
-    #filepath
-    d[['file_path']] = x
+    write_parquet(results2_df, data_filename)
     
-    #delta
-    d[['delta']] = str_detect(x, '_delta')
-    
-    return(d)
+    plan('sequential')
   }
-  ,cl = 'future'
-  )
   
-  results2_df = rbindlist(df_l)
-  
-  write_parquet(results2_df, data_filename)
-  
-  plan('sequential')
+  #----separate into multiple parquet files based on dataset to speed up processing----
+  rawvals_dir = paste0(bm_dir,'/','RawValues_parquets_cleaned')
+  if(!dir.exists(rawvals_dir)){
+    dir.check(rawvals_dir)
+    results2_df = open_dataset(data_filename) |>
+      group_by(dataset) |>
+      write_dataset(path = rawvals_dir, format = 'parquet')
   }
-  #----load and clean raw data----
-  results2_df = read_parquet(data_filename) 
-  # results2_df = as.data.table(results2_df) 
-  results2_df = results2_df %>%
-    #reformat dates
-    mutate(
-      year = str_remove(acquisition_date, '_.*'), 
-      month = str_remove(acquisition_date, '.*_')
-    ) %>%
-    mutate(acquisition_date2 = as.Date(paste0(year,'-',month,'-01'))
-    ) %>%
-    mutate(julian_day = yday(acquisition_date2)
-    ) %>%
-    #modify variable names
-    mutate(var_name = str_remove(v1, '_.*')) %>%
-    # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
-    filter(var_name != 'max_DN') %>%
-    # fix dataset names
-    mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
-    mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
-    mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
-    mutate(dataset = str_remove(dataset, "^_")) %>%
-    mutate(dataset = str_remove(dataset, '/$'))
+  results2_df = open_dataset(rawvals_dir)
+  
+  
   
   #----test if there's a significant difference between thinning and not thinning for each block and each date----
   
+  
+  all_cols = names(results2_df)
+  non_ps_cols = c('block_id', 'dataset', 'id', 'acquisition_date', 'julian_day', 'CHM_change')
+  ps_feats = all_cols[!all_cols %in% non_ps_cols]
+  ps_feats = ps_feats[ps_feats != 'VARIgreen'] #remove this index since it is undefined for many dates
+  
+  acquisition_date <- results2_df %>%
+    select(acquisition_date) %>%
+    collect() %>%
+    unique() %>%
+    pull(acquisition_date)  # Extract as a vector
+  
+  dataset <- results2_df %>%
+    select(dataset) %>%
+    collect() %>%
+    unique() %>%
+    pull(dataset)
+  
+  statistical_significance_summ = CJ(
+    var_name = ps_feats,
+    acquisition_date = acquisition_date,
+    dataset = dataset)
+  
+  harvest_threshold = -5.2 #mean Otsu's threshold applied to the change in CHM layers
+  
+  # plan('multisession', workers = 10)
+  
+  stat_results = pblapply(1:nrow(statistical_significance_summ), function(i){
+  # stat_results = pblapply(1:10, function(i){
+    
+    # ad_thinned_p = c()
+    # ad_notthinned_p = c()
+    # levene_p = c()
+    # test_type = c()
+    # difference_p = c()
+    
+    #initialize list where results will go
+    results_list = list(NA, NA, NA, NA, NA)
+    
+    print(paste0('Processing ',i,'/',nrow(statistical_significance_summ)))
+    
+    sub_df = results2_df |>
+      filter(dataset == statistical_significance_summ$dataset[i],
+             acquisition_date == statistical_significance_summ$acquisition_date[i]) |>
+      mutate(thinned = case_when(
+        CHM_change <= harvest_threshold ~ 'Thinned',
+        TRUE ~ 'Not_thinned'
+      )) |>
+      select(statistical_significance_summ$var_name[i], 'thinned') |>
+      filter(!is.na(!!sym(statistical_significance_summ$var_name[i]))) |>
+      collect()
+    
+    #proceed if there are sufficient data (since not ever combinaiton of block, acquisition date, and varaible might exist)
+    if(nrow(sub_df)>0){
+      
+      thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Thinned']
+      not_thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Not_thinned']
+      
+      ad_t = ad.test(thinned)
+      results_list[[1]] = ad_t[['p.value']]
+      ad_nt = ad.test(not_thinned)
+      results_list[[2]] = ad_nt[['p.value']]
+      
+      formula = as.formula(paste(statistical_significance_summ$var_name[i], '~ thinned'))
+      
+      sub_df$thinned = as.factor(sub_df$thinned)
+      lev = leveneTest(formula, data = sub_df)
+      results_list[[3]] = lev$`Pr(>F)`[1]
+      
+      # Test selection logic
+      # Significance level
+      alpha <- 0.05
+      
+      # Check normality and variance conditions
+      is_normal_thinned <- results_list[[1]] > alpha
+      is_normal_not_thinned <- results_list[[2]] > alpha
+      is_variance_equal <- results_list[[3]] > alpha
+      
+      # Select appropriate test
+      if (is_normal_thinned && is_normal_not_thinned) {
+        if (is_variance_equal) {
+          # Student's t-test (equal variances)
+          t_test_result <- t.test(thinned, not_thinned, var.equal = TRUE)
+          results_list[[4]] <- "Student's t-test"
+        } else {
+          # Welch's t-test (unequal variances)
+          t_test_result <- t.test(thinned, not_thinned, var.equal = FALSE)
+          results_list[[4]] <- "Welch's t-test"
+        }
+        results_list[[5]] <- t_test_result$p.value
+      } else {
+        # Non-parametric test if normality assumption is violated
+        wilcox_result <- wilcox.test(thinned, not_thinned)
+        results_list[[4]] <- "Mann-Whitney U"
+        results_list[[5]] <- wilcox_result$p.value
+      }
+      
+    }
+    
+    # results_list = list(
+    #   ad_thinned_p,
+    #   ad_notthinned_p,
+    #   levene_p,
+    #   test_type,
+    #   difference_p
+    # )
+    
+    names(results_list) = c('Anderson-Darling thinned p-value',
+                            'Anderson-Darling notthinned p-value',
+                            'Levene p-value',
+                            'Test type',
+                            'Difference p-value')
+    
+    return(results_list)
+    
+  }
+  )
+  
+  #add stats
+  statistical_significance_summ[['anderson_darling_thinned_p']] = sapply(stat_results, function(x)x[[1]])
+  statistical_significance_summ[['anderson_darling_notthinned_p']] = sapply(stat_results, function(x)x[[2]])
+  statistical_significance_summ[['levene_p']] = sapply(stat_results, function(x)x[[3]])
+  statistical_significance_summ[['test_type']] = sapply(stat_results, function(x)x[[4]])
+  statistical_significance_summ[['difference_p']] = sapply(stat_results, function(x)x[[5]])
+  
+  #----save results----
+  
+  stat_sig_file = paste0(bm_dir, '/StatDiff_ThinnedvsNotthinned.csv')
+  
+  if(!file.exists(stat_sig_file)){
+    write_csv(statistical_significance_summ, stat_sig_file)
+  }
+  
+  statistical_significance_summ = fread(stat_sig_file)
+  
+  #filter out NAs
+  statistical_significance_summ = statistical_significance_summ[!is.na(difference_p)]
 }
-
