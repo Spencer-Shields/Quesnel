@@ -1050,7 +1050,7 @@ cores = detectCores()
   # plan('multisession', workers = 10)
   
   stat_results = pblapply(1:nrow(statistical_significance_summ), function(i){
-  # stat_results = pblapply(1:10, function(i){
+    # stat_results = pblapply(1:10, function(i){
     
     # ad_thinned_p = c()
     # ad_notthinned_p = c()
@@ -1081,10 +1081,18 @@ cores = detectCores()
       thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Thinned']
       not_thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Not_thinned']
       
-      ad_t = ad.test(thinned)
-      results_list[[1]] = ad_t[['p.value']]
-      ad_nt = ad.test(not_thinned)
-      results_list[[2]] = ad_nt[['p.value']]
+      if(length(unique(thinned))==1){
+        results_list[[1]] = 0
+      } else{
+        ad_t = ad.test(thinned)
+        results_list[[1]] = ad_t[['p.value']]
+      }
+      if(length(unique(not_thinned))==1){
+        results_list[[2]] = 0
+      } else{
+        ad_nt = ad.test(not_thinned)
+        results_list[[2]] = ad_nt[['p.value']]
+      }
       
       formula = as.formula(paste(statistical_significance_summ$var_name[i], '~ thinned'))
       
@@ -1163,5 +1171,5 @@ cores = detectCores()
   
   #----join results with results_df (ie global stats for thinning vs not-thinning by block) ----
   
-  results3_df = 
+  
 }
