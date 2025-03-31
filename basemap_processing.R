@@ -14,16 +14,12 @@ library(arrow)
 library(data.table)
 library(car)
 library(nortest)
+library(pROC)
+library(varSel)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
 source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/check_radiometric_consistency.R')
-
-#set up number of cores to be used for parallel processing
-cores = detectCores()
-
-# cl = makeCluster(ceiling(cores/4))
-# plan('multisession', workers = 8)
 
 #----data preprocessing
 {
@@ -635,7 +631,7 @@ cores = detectCores()
 {
   harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
   
-  data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m')
+  data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m','_withTests_EqualClasses')
   data_filename = paste0(bm_dir,'/',data_string,'.csv')
   
   #run if summary data file does not exist
@@ -679,16 +675,27 @@ cores = detectCores()
     #block ids
     block_ids = blocks_p$BLOCKNUM
     
-    #----mask PS rasters, save global values in dataframe----
-    
     #remove NoChange rasters from list of all files
     all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
     
-    plan('multisession', workers = 10)
+    #----get spatial sample for each study area to make thinning/non-thinning classes same size----
+    #load lidar CHM change layers
+    lid_masks_equalclasses = pblapply(lidar_files, function(x){
+      #load lidar raster
+      r = rast(x)
+      #create binary thinning/non-thinning mask
+      m = ifel(lid_r <= harvest_threshold, 1, 0)
+      n_vals = global(m, notNA)
+    })
     
-    df_l = pblapply(all_files_thinning, function(x){
-      
-      # print(paste('Processing', x)) #uncomment to identify files where processing fails
+    
+    #----mask PS rasters, save global values in dataframe----
+    
+    plan('multisession', workers = 12)
+    
+    df_l = pblapply(1:length(all_files_thinning), function(i){
+      x = all_files_thinning[i]
+      print(paste0('Processing ', x,', ',i,'/',length(all_files_thinning))) #uncomment to identify files where processing fails
       
       #get raster
       r = rast(x)
@@ -699,26 +706,39 @@ cores = detectCores()
       lid_r = rast(lid_file)
       m = ifel(lid_r <= harvest_threshold, 1, 0)
       
+      #make mask for thinning and non-thinng pixels
+      mt = ifel(m == 1, 1,NA) #make mask for thinning
+      r_t = mask(r, mt) #use mask to isolate thinning pixels in raster
+      
+      mnt = ifel(m == 0, 1,NA) #make mask for non-thinning
+      r_nt = mask(r, mnt) #use mask to isolate non-thinning pixels in raster
+      
+      
       #calculate global stats for thinning pixels
-      m1 = ifel(m == 1, 1,NA) #make mask for thinning
-      r_m = mask(r, m1)
-      d1 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d1 = global(r_t, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d1 = cbind(d1, 
+                 global(r_t, median, na.rm=T) |> rename(median = global)
+      )
       d1[['block_pixel_stratum']] = 'Thinned'
       d1[['v1']] = rownames(d1)
       
-      #calculate global stats for thinning pixels
-      m2 = ifel(m == 0, 1,NA) #make mask for thinning
-      r_m = mask(r, m2)
-      d2 = global(r_m, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      #calculate global stats for non-thinning pixels
+      d2 = global(r_nt, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d2 = cbind(d2, 
+                 global(r_nt, median, na.rm=T) |> rename(median = global)
+      )
       d2[['block_pixel_stratum']] = 'Not_thinned'
       d2[['v1']] = rownames(d2)
       
       #total block stats
       d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+      d3 = cbind(d3, 
+                 global(r, median, na.rm=T) |> rename(median = global)
+      )
       d3[['block_pixel_stratum']] = 'Total'
       d3[['v1']] = rownames(d3)
       
-      #combine thinning, non-thinning, and total stats
+      #combine thinning, non-thinning, and global stats
       d = rbind(d1,d2,d3)
       
       #get dataset
@@ -735,12 +755,123 @@ cores = detectCores()
       #filepath
       d[['file_path']] = x
       
-      # #rownames
-      # d[['v1']] = rownames(d)
-      
       #delta
       d[['delta']] = str_detect(x, '_delta')
       
+      ###statistical measures between groups
+      
+      v_t = values(r_t, dataframe=T) |> mutate(thinning = 'Thinned')
+      v_nt = values(r_nt, dataframe=T) |> mutate(thinning = 'Not_thinned') 
+      v_df = rbind(v_t, v_nt)
+      
+      feats = unique(d$v1)
+      feats = feats[!feats %in% c('max_DN', 'VARIgreen')] #don't run tests on max_DN
+      
+      tests_l = pblapply(feats, function(y){
+        
+        print(paste('Processing',y))
+        #subset values to test from dataframe
+        v = v_df |> select(all_of(c(y, 'thinning')))
+        v = v[!is.na(v[[y]]),] #remove NA values
+        v$thinning = as.factor(v$thinning)
+        
+        #initialize tibble to store results
+        test_df = tibble(
+          v1 = y,
+          levene_p = NA,
+          anderson_darling_p_thinning = NA,
+          anderson_darling_p_notthinning = NA,
+          anderson_darling_p_pooled = NA,
+          student_t_p = NA,
+          welch_t_p = NA,
+          mann_whitney_p = NA,
+          anova_p = NA,
+          kruskal_wallis_p = NA,
+          logistic_p = NA,
+          logistic_aic = NA,
+          logistic_AUC = NA,
+          fisher_discriminant_ratio = NA,
+          cohen_d = NA,
+          jeffries_matusita_dist = NA
+        )
+        
+        if(nrow(v)>0){ #proceed if there are rows in the dataframe (i.e. values that aren't na)
+          ##perform tests, store results in test_df
+          
+          #create formula and linear model
+          formula = as.formula(paste(y,'~ thinning'))
+          v_lm = lm(formula, v)
+          
+          #levene test
+          levene = leveneTest(formula, v)
+          test_df$levene_p = levene$`Pr(>F)`[1]
+          
+          #anderson-darling tests (if else statements handle cases when there is one unique value)
+          t = v[[y]][v$thinning == 'Thinned']
+          test_df$anderson_darling_p_thinning = if(length(unique(t)|length(t)<8) == 1) 0 else ad.test(t)$p.value
+          nt = v[[y]][v$thinning == 'Not_thinned']
+          test_df$anderson_darling_p_notthinning = if(length(unique(nt)|length(t)<8) == 1) 0 else ad.test(nt)$p.value
+          total = v[[y]]
+          test_df$anderson_darling_p_pooled = if(length(unique(total)|length(total)<8) == 1) 0 else ad.test(total)$p.value
+          
+          #Students t-test
+          s_t = t.test(formula, v)
+          test_df$student_t_p = s_t$p.value
+          
+          #Welch's t-test
+          w_t = t.test(formula, v, var.equal = F)
+          test_df$welch_t_p = w_t$p.value
+          
+          #Mann-Whitney U test
+          mw = wilcox.test(formula, v)
+          test_df$mann_whitney_p = mw$p.value
+          
+          #ANOVA
+          anv = anova(v_lm)
+          test_df$anova_p = anv$`Pr(>F)`[1]
+          
+          #Kruskal-Wallis
+          kw = kruskal.test(formula, v)
+          test_df$kruskal_wallis_p = kw$p.value
+          
+          #logistic regression model
+          log_form = paste('thinning ~', y)
+          log_m = glm(log_form, v, family = 'binomial')
+          log_m_summ = summary(log_m)
+          
+          test_df$logistic_p = log_m_summ$coefficients[,4][[y]]
+          test_df$logistic_aic = log_m_summ$aic
+          
+          log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
+          log_roc = roc(thinning ~ predictions, log_p, quiet=T)
+          test_df$logistic_AUC = as.numeric(auc(log_roc))
+          
+          #Fisher discriminant ratio
+          fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
+          test_df$fisher_discriminant_ratio = fdr
+          
+          #Cohen's d
+          pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
+                              (d2$notNA[d2$v1 == y] - 1) * d2$sd[d2$v1 == y]^2) /
+                             (d1$notNA[d1$v1 == y] + d2$notNA[d2$v1 == y] - 2))
+          cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
+          test_df$cohen_d = cohen_d
+          
+          #Jeffries-Matusita distance
+          jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
+          test_df$jeffries_matusita_dist = jmd$jmdist
+        }
+        
+        #return results dataframe
+        return(test_df)
+      })
+      test_results = bind_rows(tests_l)
+      
+      ###attach statistical test results to the summary stats dataframe
+      
+      d = d %>% left_join(test_results, by = 'v1')
+      
+      ####return final result
       return(d)
     }
     ,cl = 'future'
@@ -748,7 +879,7 @@ cores = detectCores()
     
     results_df = bind_rows(df_l)
     
-    write.csv(results_df, data_filename)
+    write_csv(results_df, data_filename)
     
     plan('sequential')
   }
@@ -776,38 +907,18 @@ cores = detectCores()
   
   
   
-  #----check results----
-  results_summ = results_df %>%
-    group_by(dataset, block_pixel_stratum, block_id, var_name) %>%
-    summarise(count = n()) %>%
-    ungroup()%>%
-    complete(dataset, block_pixel_stratum, block_id, var_name, fill = list(count = 0))
-  # view(results_summ)
-  
-  #----rescale variable values so that they can be plotted together----
-  
-  #get min and max means and standard deviations
-  vars_summ = results_df %>%
-    group_by(var_name) %>%
-    summarise(max_mean = max(mean),
-              min_mean = min(mean),
-              mean_mean = mean(mean),
-              max_sd = max(std),
-              min_sd = min(std),
-              mean_sd = mean(std))
-  
   #----plotting vegetation indices over time----
   {
     indices = c(
       # "blue", "green", "red"
       # ,
-      "Hue"
-      ,
-      "GCC"
-      ,
+      # "Hue"
+      # ,
+      # "GCC"
+      # ,
       "NDGR"
-      ,
-      "BI"
+      # ,
+      # "BI"
       # ,
       # "CI", "CRI550",
       # "GLI", "TVI"
@@ -822,6 +933,24 @@ cores = detectCores()
       # ,"NoChange1.1_conifer", "NoChange1.2_conifer",
       # "NoChange4_conifer",   "NoChange5_conifer",  
       # "NoChange6_conifer",   "NoChange7_conifer"
+    )
+    
+    tests_ = c(
+      'levene_p',
+      'anderson_darling_p_thinning',
+      'anderson_darling_p_notthinning',
+      'anderson_darling_p_pooled',
+      'student_t_p',
+      'welch_t_p',
+      'mann_whitney_p',
+      'anova_p',
+      'kruskal_wallis_p',
+      'logistic_p',
+      'logistic_aic',
+      'logistic_AUC',
+      'fisher_discriminant_ratio',
+      'cohen_d',
+      'jeffries_matusita_dist'
     )
     
     datasets_ = c(
@@ -868,7 +997,8 @@ cores = detectCores()
              , block_pixel_stratum %in% pixel_stratum) %>%
       left_join(harvest_dates_df %>% mutate(harvest_date = as.Date(paste0(harvest_month,'-01'))))
     
-    ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
+    #harvest pixel values
+    pixels_p = ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
       geom_point(aes(color = block_pixel_stratum))+
       geom_line(aes(color = block_pixel_stratum))+
       geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
@@ -882,7 +1012,25 @@ cores = detectCores()
       # geom_vline(xintercept = as.Date('2022-07-01')) + #12L_D345
       geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
       ggtitle(unique(subset_df$dataset))
+    
+    #seperability test results
+    sep_p = ggplot(subset_df |> filter(block_pixel_stratum == 'Thinned') #remove redundant info (since thinning, not_thinning, and total have same stats info)
+                   , aes(x = acquisition_date2, y = jeffries_matusita_dist)) +
+      geom_point()+
+      geom_line()+
+      # geom_ribbon(aes(x = acquisition_date, ymin = mean-sds, ymax = mean+sds))+
+      scale_x_date(
+        date_breaks = "1 year",       # Major tick marks every year
+        date_labels = "%Y %m",           # Year labels on major ticks
+        date_minor_breaks = "1 month" # Minor tick marks every month
+      )+
+      facet_grid(rows = vars(block_id), cols = vars(var_name), scales = 'free') +
+      # geom_vline(xintercept = as.Date('2022-07-01')) + #12L_D345
+      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
+      ggtitle(unique(subset_df$dataset))
+    sep_p
   }
+  
 }
 
 #----timeseries analysis using raw pixel values
@@ -1007,162 +1155,124 @@ cores = detectCores()
   
   #----test if there's a significant difference between thinning and not thinning for each block and each date----
   
-  
-  all_cols = names(results2_df)
-  non_ps_cols = c('block_id', 'dataset', 'id', 'acquisition_date', 'julian_day', 'CHM_change')
-  ps_feats = all_cols[!all_cols %in% non_ps_cols]
-  ps_feats = ps_feats[ps_feats != 'VARIgreen'] #remove this index since it is undefined for many dates
-  
-  # acquisition_date <- results2_df %>%
-  #   select(acquisition_date) %>%
-  #   collect() %>%
-  #   unique() %>%
-  #   pull(acquisition_date)  # Extract as a vector
-  # 
-  # dataset <- results2_df %>%
-  #   select(dataset) %>%
-  #   collect() %>%
-  #   unique() %>%
-  #   pull(dataset)
-  # 
-  # block_id <- results2_df %>%
-  #   select(block_id) %>%
-  #   collect() %>%
-  #   unique() %>%
-  #   pull(block_id)
-  # 
-  # statistical_significance_summ = CJ(
-  #   var_name = ps_feats,
-  #   acquisition_date = acquisition_date,
-  #   dataset = dataset,
-  #   block_id = block_id)
-  
-  #make dataframe with every combination of block_id, dataset, acquisition_date, and var_name
-  statistical_significance_summ = results2_df |>
-    select(acquisition_date, dataset, block_id) |>
-    distinct() |>
-    collect() |>
-    crossing(var_name = ps_feats) |>
-    filter(var_name != 'VARIgreen')
-  
-  harvest_threshold = -5.2 #mean Otsu's threshold applied to the change in CHM layers
-  
-  # plan('multisession', workers = 10)
-  
-  stat_results = pblapply(1:nrow(statistical_significance_summ), function(i){
-    # stat_results = pblapply(1:10, function(i){
-    
-    # ad_thinned_p = c()
-    # ad_notthinned_p = c()
-    # levene_p = c()
-    # test_type = c()
-    # difference_p = c()
-    
-    #initialize list where results will go
-    results_list = list(NA, NA, NA, NA, NA)
-    
-    print(paste0('Processing ',i,'/',nrow(statistical_significance_summ)))
-    
-    sub_df = results2_df |>
-      filter(dataset == statistical_significance_summ$dataset[i],
-             acquisition_date == statistical_significance_summ$acquisition_date[i],
-             block_id == statistical_significance_summ$block_id[i]) |>
-      mutate(thinned = case_when(
-        CHM_change <= harvest_threshold ~ 'Thinned',
-        TRUE ~ 'Not_thinned'
-      )) |>
-      select(statistical_significance_summ$var_name[i], 'thinned') |>
-      filter(!is.na(!!sym(statistical_significance_summ$var_name[i]))) |>
-      collect()
-    
-    #proceed if there are sufficient data (since not ever combinaiton of block, acquisition date, and varaible might exist)
-    if(nrow(sub_df)>0){
-      
-      thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Thinned']
-      not_thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Not_thinned']
-      
-      if(length(unique(thinned))==1){
-        results_list[[1]] = 0
-      } else{
-        ad_t = ad.test(thinned)
-        results_list[[1]] = ad_t[['p.value']]
-      }
-      if(length(unique(not_thinned))==1){
-        results_list[[2]] = 0
-      } else{
-        ad_nt = ad.test(not_thinned)
-        results_list[[2]] = ad_nt[['p.value']]
-      }
-      
-      formula = as.formula(paste(statistical_significance_summ$var_name[i], '~ thinned'))
-      
-      sub_df$thinned = as.factor(sub_df$thinned)
-      lev = leveneTest(formula, data = sub_df)
-      results_list[[3]] = lev$`Pr(>F)`[1]
-      
-      # Test selection logic
-      # Significance level
-      alpha <- 0.05
-      
-      # Check normality and variance conditions
-      is_normal_thinned <- results_list[[1]] > alpha
-      is_normal_not_thinned <- results_list[[2]] > alpha
-      is_variance_equal <- results_list[[3]] > alpha
-      
-      # Select appropriate test
-      if (is_normal_thinned && is_normal_not_thinned) {
-        if (is_variance_equal) {
-          # Student's t-test (equal variances)
-          t_test_result <- t.test(thinned, not_thinned, var.equal = TRUE)
-          results_list[[4]] <- "Student's t-test"
-        } else {
-          # Welch's t-test (unequal variances)
-          t_test_result <- t.test(thinned, not_thinned, var.equal = FALSE)
-          results_list[[4]] <- "Welch's t-test"
-        }
-        results_list[[5]] <- t_test_result$p.value
-      } else {
-        # Non-parametric test if normality assumption is violated
-        wilcox_result <- wilcox.test(thinned, not_thinned)
-        results_list[[4]] <- "Mann-Whitney U"
-        results_list[[5]] <- wilcox_result$p.value
-      }
-      
-    }
-    
-    # results_list = list(
-    #   ad_thinned_p,
-    #   ad_notthinned_p,
-    #   levene_p,
-    #   test_type,
-    #   difference_p
-    # )
-    
-    names(results_list) = c('Anderson-Darling thinned p-value',
-                            'Anderson-Darling notthinned p-value',
-                            'Levene p-value',
-                            'Test type',
-                            'Difference p-value')
-    
-    return(results_list)
-    
-  }
-  )
-  
-  #add stats
-  statistical_significance_summ[['anderson_darling_thinned_p']] = sapply(stat_results, function(x)x[[1]])
-  statistical_significance_summ[['anderson_darling_notthinned_p']] = sapply(stat_results, function(x)x[[2]])
-  statistical_significance_summ[['levene_p']] = sapply(stat_results, function(x)x[[3]])
-  statistical_significance_summ[['test_type']] = sapply(stat_results, function(x)x[[4]])
-  statistical_significance_summ[['difference_p']] = sapply(stat_results, function(x)x[[5]])
-  
-  #----save results----
-  
   stat_sig_file = paste0(bm_dir, '/StatDiff_ThinnedvsNotthinned.csv')
   
   if(!file.exists(stat_sig_file)){
+    
+    all_cols = names(results2_df)
+    non_ps_cols = c('block_id', 'dataset', 'id', 'acquisition_date', 'julian_day', 'CHM_change')
+    ps_feats = all_cols[!all_cols %in% non_ps_cols]
+    ps_feats = ps_feats[ps_feats != 'VARIgreen'] #remove this index since it is undefined for many dates
+    
+    
+    #make dataframe with every combination of block_id, dataset, acquisition_date, and var_name
+    statistical_significance_summ = results2_df |>
+      select(acquisition_date, dataset, block_id) |>
+      distinct() |>
+      collect() |>
+      crossing(var_name = ps_feats) |>
+      filter(var_name != 'VARIgreen')
+    
+    harvest_threshold = -5.2 #mean Otsu's threshold applied to the change in CHM layers
+    
+    # plan('multisession', workers = 10)
+    
+    stat_results = pblapply(1:nrow(statistical_significance_summ), function(i){
+      # stat_results = pblapply(1:10, function(i){
+      
+      #initialize list where results will go
+      results_list = list(NA, NA, NA, NA, NA)
+      
+      print(paste0('Processing ',i,'/',nrow(statistical_significance_summ)))
+      
+      sub_df = results2_df |>
+        filter(dataset == statistical_significance_summ$dataset[i],
+               acquisition_date == statistical_significance_summ$acquisition_date[i],
+               block_id == statistical_significance_summ$block_id[i]) |>
+        mutate(thinned = case_when(
+          CHM_change <= harvest_threshold ~ 'Thinned',
+          TRUE ~ 'Not_thinned'
+        )) |>
+        select(statistical_significance_summ$var_name[i], 'thinned') |>
+        filter(!is.na(!!sym(statistical_significance_summ$var_name[i]))) |>
+        collect()
+      
+      #proceed if there are sufficient data (since not ever combinaiton of block, acquisition date, and varaible might exist)
+      if(nrow(sub_df)>0){
+        
+        thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Thinned']
+        not_thinned = sub_df[[statistical_significance_summ$var_name[i]]][sub_df$thinned == 'Not_thinned']
+        
+        if(length(unique(thinned))==1){
+          results_list[[1]] = 0
+        } else{
+          ad_t = ad.test(thinned)
+          results_list[[1]] = ad_t[['p.value']]
+        }
+        if(length(unique(not_thinned))==1){
+          results_list[[2]] = 0
+        } else{
+          ad_nt = ad.test(not_thinned)
+          results_list[[2]] = ad_nt[['p.value']]
+        }
+        
+        formula = as.formula(paste(statistical_significance_summ$var_name[i], '~ thinned'))
+        
+        sub_df$thinned = as.factor(sub_df$thinned)
+        lev = leveneTest(formula, data = sub_df)
+        results_list[[3]] = lev$`Pr(>F)`[1]
+        
+        # Test selection logic
+        # Significance level
+        alpha <- 0.05
+        
+        # Check normality and variance conditions
+        is_normal_thinned <- results_list[[1]] > alpha
+        is_normal_not_thinned <- results_list[[2]] > alpha
+        is_variance_equal <- results_list[[3]] > alpha
+        
+        # Select appropriate test
+        if (is_normal_thinned && is_normal_not_thinned) {
+          if (is_variance_equal) {
+            # Student's t-test (equal variances)
+            t_test_result <- t.test(thinned, not_thinned, var.equal = TRUE)
+            results_list[[4]] <- "Student's t-test"
+          } else {
+            # Welch's t-test (unequal variances)
+            t_test_result <- t.test(thinned, not_thinned, var.equal = FALSE)
+            results_list[[4]] <- "Welch's t-test"
+          }
+          results_list[[5]] <- t_test_result$p.value
+        } else {
+          # Non-parametric test if normality assumption is violated
+          wilcox_result <- wilcox.test(thinned, not_thinned)
+          results_list[[4]] <- "Mann-Whitney U"
+          results_list[[5]] <- wilcox_result$p.value
+        }
+        
+      }
+      
+      names(results_list) = c('Anderson-Darling thinned p-value',
+                              'Anderson-Darling notthinned p-value',
+                              'Levene p-value',
+                              'Test type',
+                              'Difference p-value')
+      return(results_list)
+      
+    }
+    )
+    
+    #add stats
+    statistical_significance_summ[['anderson_darling_thinned_p']] = sapply(stat_results, function(x)x[[1]])
+    statistical_significance_summ[['anderson_darling_notthinned_p']] = sapply(stat_results, function(x)x[[2]])
+    statistical_significance_summ[['levene_p']] = sapply(stat_results, function(x)x[[3]])
+    statistical_significance_summ[['test_type']] = sapply(stat_results, function(x)x[[4]])
+    statistical_significance_summ[['difference_p']] = sapply(stat_results, function(x)x[[5]])
+    
+    
     write_csv(statistical_significance_summ, stat_sig_file)
   }
+  
   
   statistical_significance_summ = fread(stat_sig_file)
   
@@ -1171,5 +1281,110 @@ cores = detectCores()
   
   #----join results with results_df (ie global stats for thinning vs not-thinning by block) ----
   
+  alpha = 0.001
   
+  
+  results3_df <- inner_join( #join statistical significance results to global stats thinnedvsnotthinned
+    results_df,
+    statistical_significance_summ |> 
+      mutate(acquisition_date2 = as.Date(acquisition_date)),
+    by = c('dataset', 'acquisition_date2', 'block_id', 'var_name')
+  ) |>
+    mutate(significant_dif = ifelse(difference_p < alpha, 1, 0))
+  
+  #----plotting vegetation indices over time----
+  {
+    indices = c(
+      "blue", "green", "red"
+      ,
+      "Hue"
+      ,
+      "GCC"
+      ,
+      "NDGR"
+      ,
+      "BI"
+      # ,
+      # "CI", "CRI550",
+      # "GLI", "TVI"
+    ) #vector of indices to look at
+    
+    blocks_ = c(
+      "12L_C5"
+      ,
+      "12L_D345"
+      ,  "12L_C4",    "12L_C7",    "12L_B8C3",  "12N_T3",    "12N_1X1W",  "12N_V1"
+      # ,"NoChange1.1_conifer", "NoChange1.2_conifer",
+      # "NoChange4_conifer",   "NoChange5_conifer",  
+      # "NoChange6_conifer",   "NoChange7_conifer"
+    )
+    
+    datasets_ = c(
+      'Z'
+      # ,
+      # 'Z_delta'
+      # ,
+      # 'Zrobust'
+      # , 'Zrobust_delta'
+      # ,
+      # 'SM'
+      # ,
+      # 'SM_delta'
+      # 'Non-normalized'
+    )
+    
+    months_ = c(
+      '01','02','03',
+      '04',
+      '05','06','07','08','09','10','11'
+      ,'12'
+    )
+    
+    harvest_dates_df = tibble(
+      block_id = blocks_p$BLOCKNUM[!str_detect(blocks_p$BLOCKNUM, 'NoChange')],
+      harvest_month = c('2023-02'
+                        ,'2022-07'
+                        ,'2023-02'
+                        ,'2023-02'
+                        ,'2023-02'
+                        ,'2023-02'
+                        ,'2024-03'
+                        ,'2024-03')
+      ,harvest_note = c('-','-','-','-','-','partial, complete 2023-03','-','partial, complete 2024-04')
+    )
+    
+    pixel_stratum = c('Not_thinned', 'Thinned')
+    
+    subset_df = results3_df %>% 
+      filter(var_name %in% indices
+             , str_detect(block_id, paste(blocks_, collapse = "|"))
+             , dataset %in% datasets_
+             , month %in% months_
+             , block_pixel_stratum %in% pixel_stratum) %>%
+      left_join(harvest_dates_df %>% mutate(harvest_date = as.Date(paste0(harvest_month,'-01'))))
+    
+    ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
+      geom_point(aes(color = block_pixel_stratum))+
+      geom_line(aes(color = block_pixel_stratum))+
+      geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+      # geom_ribbon(aes(x = acquisition_date, ymin = mean-sds, ymax = mean+sds))+
+      scale_x_date(
+        date_breaks = "1 year",       # Major tick marks every year
+        date_labels = "%Y %m",           # Year labels on major ticks
+        date_minor_breaks = "1 month" # Minor tick marks every month
+      )+
+      facet_grid(rows = vars(block_id), cols = vars(var_name), scales = 'free') +
+      # geom_vline(xintercept = as.Date('2022-07-01')) + #12L_D345
+      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
+      #add significant difference signs
+      geom_point(data = subset_df %>% filter(significant_dif==1), aes(x = acquisition_date2, y = -2
+                                                                      , shape = paste0('Difference (p<',alpha,')')))+
+      guides(
+        color = guide_legend(title = NULL),
+        fill = guide_legend(title = NULL),
+        linetype = guide_legend(title = NULL),
+        shape = guide_legend(title = NULL)
+      ) +
+      ggtitle(unique(subset_df$dataset))
+  }
 }
