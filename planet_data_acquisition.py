@@ -216,8 +216,9 @@ gdf_coverage['month'] = gdf_coverage['acquired'].dt.strftime('%m')  # Extract MM
 
 year_month_counts = gdf_coverage['year_month'].value_counts().sort_index()
 
-#limit to only imagery from march to november (i.e. growing season)
-exclude_months = ['12', '01', '02', '03', '04']
+# #limit to only imagery from march to november (i.e. growing season)
+# exclude_months = ['12', '01', '02', '03', '04']
+exclude_months = []
 gdf_gs = gdf_coverage[~gdf_coverage['month'].isin(exclude_months)]
 
 len(gdf_gs)
@@ -277,11 +278,11 @@ def place_order(request, auth):
     order_url = orders_url + '/' + order_id
     return order_url
 
-# #place the order (uncomment to run)
-# orders_url = place_order(request, session.auth)
+#place the order (uncomment to run)
+orders_url = place_order(request, session.auth)
 
 #check status of order
-def poll_for_success(order_url, auth, num_loops=30):
+def poll_for_success(order_url, auth, num_loops=150):
     count = 0
     while(count < num_loops):
         count += 1
@@ -325,5 +326,5 @@ def download_results(results, download_dir='data', overwrite=False):
         else:
             print('{} already exists, skipping {}'.format(path, name))
 
-##download the imagery (uncomment to run)
-# download_results(results, download_dir)
+#download the imagery (uncomment to run)
+download_results(results, download_dir)
