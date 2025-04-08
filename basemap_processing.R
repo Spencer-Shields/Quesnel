@@ -18,10 +18,8 @@ library(pROC)
 library(varSel)
 library(tseries)
 library(lme4)
-library(moments)
 library(mgcv)
-library(fitdistrplus)
-library(betareg)
+library(glmmTMB)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
@@ -635,309 +633,312 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
 
 #----timeseries analysis by block and by thinned vs not thinned pixels
 {
-  harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
-  
-  data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m','_withTests_EqualClasses')
-  data_filename = paste0(bm_dir,'/',data_string,'.csv')
-  
-  #run if summary data file does not exist
-  if(!file.exists(data_filename)){
+  #extract stats from remote sensing data
+  {
+    harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
     
-    #----load LiDAR data----
-    lidar_dir = 'data/Quesnel_thinning/chm_change_basemap'
-    lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
-    lidar_ids = basename(file_path_sans_ext(lidar_files))
-    names(lidar_files) = lidar_ids
+    data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m','_withTests_EqualClasses')
+    data_filename = paste0(bm_dir,'/',data_string,'.csv')
     
-    #----set up for processing----
-    
-    #get list of all files
-    dirs = c(
-      #change data
-      dz_dir,
-      dzr_dir,
-      dsm_dir,
-      dn_dir
-      #no-change data
-      ,z_dir
-      ,zr_dir
-      ,sm_dir
-      ,nonorm_dir
-    )
-    
-    all_files <- unlist(sapply(dirs, list.files, pattern = "\\.tif$", full.names = TRUE, recursive = TRUE))
-    
-    #get vector of all possible dates in timeseries
-    start_date <- as.Date("2021-01-01")
-    end_date <- as.Date("2024-12-31")
-    date_vector <- seq.Date(from = start_date, to = end_date, by = "month")
-    date_vector <- format(date_vector, "%Y-%m")
-    date_vector = as.character(date_vector)
-    date_vector = str_replace_all(date_vector,'-','_')
-    
-    #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
-    dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
-    
-    #block ids
-    block_ids = blocks_p$BLOCKNUM
-    
-    #remove NoChange rasters from list of all files
-    all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
-    
-    #----get spatial sample for each study area to make thinning/non-thinning classes same size----
-    
-    #load lidar CHM change layers
-    lid_masks_equalclasses = pblapply(lidar_files, function(x){
-      #load lidar raster
-      # print(paste('Processing',x))
-      r = rast(x)
+    #run if summary data file does not exist
+    if(!file.exists(data_filename)){
       
-      #create raster stack with thinning/nonthinning mask layers
-      m_t = ifel(r <= harvest_threshold, 1, NA) #create thinning mask layer
-      m_nt = ifel(r > harvest_threshold, 0, NA) #create non-thinning mask layer
-      m = c(m_t, m_nt) #stack layers
-      names(m) = c('Thinning', 'Non_thinning') #name layers
+      #----load LiDAR data----
+      lidar_dir = 'data/Quesnel_thinning/chm_change_basemap'
+      lidar_files = list.files(lidar_dir, full.names = T, recursive = T)
+      lidar_ids = basename(file_path_sans_ext(lidar_files))
+      names(lidar_files) = lidar_ids
       
-      #get number of non-NA pixels in each layer of the raster stack
-      gvals = global(m, 'notNA')
+      #----set up for processing----
       
-      n_t = gvals$notNA[rownames(gvals)=='Thinning'] #number of non-NA thinning pixels
-      n_nt = gvals$notNA[rownames(gvals)=='Non_thinning'] #number of non-NA non-thinning pixels
-      
-      #if one layer has more pixels than the other, do a subsample so that they have the same number and replace the raster layer with the subsampled layer
-      if(n_t > n_nt){
-        target_size = n_nt
-        #sample thinning mask
-        m_s_xy = terra::spatSample(m_t, size = target_size, xy=T, method='random', na.rm=T, replace=F, exhaustive = T)
-        m_s = rast(m_s_xy, type = 'xyz')
-        m[[1]] = m_s |> resample(m_t)
-      }
-      if(n_t < n_nt){
-        target_size = n_t
-        #sample thinning mask
-        m_s_xy = terra::spatSample(m_nt, size = target_size, xy=T, method='random', na.rm=T, replace=F, exhaustive = T)
-        m_s = rast(m_s_xy, type = 'xyz')
-        # m_s = ifel(m_s == 1, 0,NA) #reset values to zero since they become one for some reason
-        m[[2]] = m_s |> resample(m_nt)
-      }
-      
-      names(m) = c('Thinning', 'Non-thinning')
-      m = wrap(m) #wrap for parallel processing
-      return(m)
-    })
-    
-    #----mask PS rasters, save global values in dataframe----
-    
-    plan('multisession', workers = 10)
-    
-    # df_l = pblapply(1:10, function(i){
-    df_l = pblapply(1:length(all_files_thinning), function(i){
-      x = all_files_thinning[i]
-      # print(paste0('Processing ', x,', ',i,'/',length(all_files_thinning))) #uncomment to identify files where processing fails
-      
-      #get raster
-      r = rast(x)
-      
-      # #old code used when lidar is not sampled
-      # #select appropriate lidar layer, create binary thinning mask
-      # block = find_substring(x, lidar_ids)
-      # lid_file = lidar_files[block]
-      # lid_r = rast(lid_file)
-      # m = ifel(lid_r <= harvest_threshold, 1, 0)
-      # 
-      # #make mask for thinning and non-thinng pixels
-      # mt = ifel(m == 1, 1,NA) #make mask for thinning
-      # r_t = mask(r, mt) #use mask to isolate thinning pixels in raster
-      # 
-      # mnt = ifel(m == 0, 1,NA) #make mask for non-thinning
-      # r_nt = mask(r, mnt) #use mask to isolate non-thinning pixels in raster
-      
-      #get lidar mask
-      block = find_substring(x, lidar_ids)
-      lid_mask_wrapped = lid_masks_equalclasses[[block]]
-      m = unwrap(lid_mask_wrapped)
-      
-      #mask planetscope raster using thinning and non-thinning masks
-      r_t = mask(r, m[[1]])
-      r_nt = mask(r, m[[2]])
-      
-      #calculate global stats for thinning pixels
-      d1 = global(r_t, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      d1 = cbind(d1, 
-                 global(r_t, median, na.rm=T) |> rename(median = global)
+      #get list of all files
+      dirs = c(
+        #change data
+        dz_dir,
+        dzr_dir,
+        dsm_dir,
+        dn_dir
+        #no-change data
+        ,z_dir
+        ,zr_dir
+        ,sm_dir
+        ,nonorm_dir
       )
-      d1[['block_pixel_stratum']] = 'Thinned'
-      d1[['v1']] = rownames(d1)
       
-      #calculate global stats for non-thinning pixels
-      d2 = global(r_nt, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      d2 = cbind(d2, 
-                 global(r_nt, median, na.rm=T) |> rename(median = global)
-      )
-      d2[['block_pixel_stratum']] = 'Not_thinned'
-      d2[['v1']] = rownames(d2)
+      all_files <- unlist(sapply(dirs, list.files, pattern = "\\.tif$", full.names = TRUE, recursive = TRUE))
       
-      #total block stats
-      d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      d3 = cbind(d3, 
-                 global(r, median, na.rm=T) |> rename(median = global)
-      )
-      d3[['block_pixel_stratum']] = 'Total'
-      d3[['v1']] = rownames(d3)
+      #get vector of all possible dates in timeseries
+      start_date <- as.Date("2021-01-01")
+      end_date <- as.Date("2024-12-31")
+      date_vector <- seq.Date(from = start_date, to = end_date, by = "month")
+      date_vector <- format(date_vector, "%Y-%m")
+      date_vector = as.character(date_vector)
+      date_vector = str_replace_all(date_vector,'-','_')
       
-      #combine thinning, non-thinning, and global stats
-      d = rbind(d1,d2,d3)
+      #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
+      dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
       
-      #get dataset
-      dataset = find_substring(x,dataset_strings)
-      d[['dataset']] = dataset
+      #block ids
+      block_ids = blocks_p$BLOCKNUM
       
-      #get block
-      d[['block_id']] = block
+      #remove NoChange rasters from list of all files
+      all_files_thinning = all_files[!str_detect(all_files, 'NoChange')]
       
-      #get date
-      date_ = find_substring(x, date_vector)
-      d[['acquisition_date']] = date_
+      #----get spatial sample for each study area to make thinning/non-thinning classes same size----
       
-      #filepath
-      d[['file_path']] = x
-      
-      #delta
-      d[['delta']] = str_detect(x, '_delta')
-      
-      ###statistical measures between groups
-      
-      v_t = values(r_t, dataframe=T) |> mutate(thinning = 'Thinned')
-      v_nt = values(r_nt, dataframe=T) |> mutate(thinning = 'Not_thinned') 
-      v_df = rbind(v_t, v_nt)
-      
-      feats = unique(d$v1)
-      feats = feats[!feats %in% c('max_DN', 'VARIgreen')] #don't run tests on max_DN
-      
-      tests_l = pblapply(feats, function(y){
+      #load lidar CHM change layers
+      lid_masks_equalclasses = pblapply(lidar_files, function(x){
+        #load lidar raster
+        # print(paste('Processing',x))
+        r = rast(x)
         
-        print(paste('Processing',y))
-        #subset values to test from dataframe
-        v = v_df |> select(all_of(c(y, 'thinning')))
-        v = v[!is.na(v[[y]]),] #remove NA values
-        v$thinning = as.factor(v$thinning)
+        #create raster stack with thinning/nonthinning mask layers
+        m_t = ifel(r <= harvest_threshold, 1, NA) #create thinning mask layer
+        m_nt = ifel(r > harvest_threshold, 0, NA) #create non-thinning mask layer
+        m = c(m_t, m_nt) #stack layers
+        names(m) = c('Thinning', 'Non_thinning') #name layers
         
-        #initialize tibble to store results
-        test_df = tibble(
-          v1 = y,
-          levene_p = NA,
-          anderson_darling_p_thinning = NA,
-          anderson_darling_p_notthinning = NA,
-          anderson_darling_p_pooled = NA,
-          student_t_p = NA,
-          welch_t_p = NA,
-          mann_whitney_p = NA,
-          anova_p = NA,
-          kruskal_wallis_p = NA,
-          logistic_p = NA,
-          logistic_aic = NA,
-          logistic_AUC = NA,
-          fisher_discriminant_ratio = NA,
-          cohen_d = NA,
-          jeffries_matusita_dist = NA,
-          bhattacharya_dist = NA
-        )
+        #get number of non-NA pixels in each layer of the raster stack
+        gvals = global(m, 'notNA')
         
-        if(nrow(v)>0){ #proceed if there are rows in the dataframe (i.e. values that aren't na)
-          ##perform tests, store results in test_df
-          
-          #create formula and linear model
-          formula = as.formula(paste(y,'~ thinning'))
-          v_lm = lm(formula, v)
-          
-          #levene test
-          levene = leveneTest(formula, v)
-          test_df$levene_p = levene$`Pr(>F)`[1]
-          
-          #anderson-darling tests (if else statements handle cases when there is one unique value)
-          t = v[[y]][v$thinning == 'Thinned']
-          test_df$anderson_darling_p_thinning = if(length(unique(t)|length(t)<8) == 1) 0 else ad.test(t)$p.value
-          nt = v[[y]][v$thinning == 'Not_thinned']
-          test_df$anderson_darling_p_notthinning = if(length(unique(nt)|length(t)<8) == 1) 0 else ad.test(nt)$p.value
-          total = v[[y]]
-          test_df$anderson_darling_p_pooled = if(length(unique(total)|length(total)<8) == 1) 0 else ad.test(total)$p.value
-          
-          #Students t-test
-          s_t = t.test(formula, v)
-          test_df$student_t_p = s_t$p.value
-          
-          #Welch's t-test
-          w_t = t.test(formula, v, var.equal = F)
-          test_df$welch_t_p = w_t$p.value
-          
-          #Mann-Whitney U test
-          mw = wilcox.test(formula, v)
-          test_df$mann_whitney_p = mw$p.value
-          
-          #ANOVA
-          anv = anova(v_lm)
-          test_df$anova_p = anv$`Pr(>F)`[1]
-          
-          #Kruskal-Wallis
-          kw = kruskal.test(formula, v)
-          test_df$kruskal_wallis_p = kw$p.value
-          
-          #logistic regression model
-          log_form = paste('thinning ~', y)
-          log_m = glm(log_form, v, family = 'binomial')
-          log_m_summ = summary(log_m)
-          
-          test_df$logistic_p = log_m_summ$coefficients[,4][[y]]
-          test_df$logistic_aic = log_m_summ$aic
-          
-          log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
-          log_roc = roc(thinning ~ predictions, log_p, quiet=T)
-          test_df$logistic_AUC = as.numeric(auc(log_roc))
-          
-          #Fisher discriminant ratio
-          fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
-          test_df$fisher_discriminant_ratio = fdr
-          
-          #Cohen's d
-          pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
-                              (d2$notNA[d2$v1 == y] - 1) * d2$sd[d2$v1 == y]^2) /
-                             (d1$notNA[d1$v1 == y] + d2$notNA[d2$v1 == y] - 2))
-          cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
-          test_df$cohen_d = cohen_d
-          
-          #Jeffries-Matusita distance
-          jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
-          test_df$jeffries_matusita_dist = jmd$jmdist
-          
-          #Bhattacharya distance
-          bhat = BHATdist(g = v$thinning, X = tibble(v[[y]]))
-          test_df$bhattacharya_dist = bhat$bhatdist
-          
-          #I 
+        n_t = gvals$notNA[rownames(gvals)=='Thinning'] #number of non-NA thinning pixels
+        n_nt = gvals$notNA[rownames(gvals)=='Non_thinning'] #number of non-NA non-thinning pixels
+        
+        #if one layer has more pixels than the other, do a subsample so that they have the same number and replace the raster layer with the subsampled layer
+        if(n_t > n_nt){
+          target_size = n_nt
+          #sample thinning mask
+          m_s_xy = terra::spatSample(m_t, size = target_size, xy=T, method='random', na.rm=T, replace=F, exhaustive = T)
+          m_s = rast(m_s_xy, type = 'xyz')
+          m[[1]] = m_s |> resample(m_t)
+        }
+        if(n_t < n_nt){
+          target_size = n_t
+          #sample thinning mask
+          m_s_xy = terra::spatSample(m_nt, size = target_size, xy=T, method='random', na.rm=T, replace=F, exhaustive = T)
+          m_s = rast(m_s_xy, type = 'xyz')
+          # m_s = ifel(m_s == 1, 0,NA) #reset values to zero since they become one for some reason
+          m[[2]] = m_s |> resample(m_nt)
         }
         
-        #return results dataframe
-        return(test_df)
+        names(m) = c('Thinning', 'Non-thinning')
+        m = wrap(m) #wrap for parallel processing
+        return(m)
       })
-      test_results = bind_rows(tests_l)
       
-      ###attach statistical test results to the summary stats dataframe
+      #----mask PS rasters, save global values in dataframe----
       
-      d = d %>% left_join(test_results, by = 'v1')
+      plan('multisession', workers = 10)
       
-      ####return final result
-      return(d)
+      # df_l = pblapply(1:10, function(i){
+      df_l = pblapply(1:length(all_files_thinning), function(i){
+        x = all_files_thinning[i]
+        # print(paste0('Processing ', x,', ',i,'/',length(all_files_thinning))) #uncomment to identify files where processing fails
+        
+        #get raster
+        r = rast(x)
+        
+        # #old code used when lidar is not sampled
+        # #select appropriate lidar layer, create binary thinning mask
+        # block = find_substring(x, lidar_ids)
+        # lid_file = lidar_files[block]
+        # lid_r = rast(lid_file)
+        # m = ifel(lid_r <= harvest_threshold, 1, 0)
+        # 
+        # #make mask for thinning and non-thinng pixels
+        # mt = ifel(m == 1, 1,NA) #make mask for thinning
+        # r_t = mask(r, mt) #use mask to isolate thinning pixels in raster
+        # 
+        # mnt = ifel(m == 0, 1,NA) #make mask for non-thinning
+        # r_nt = mask(r, mnt) #use mask to isolate non-thinning pixels in raster
+        
+        #get lidar mask
+        block = find_substring(x, lidar_ids)
+        lid_mask_wrapped = lid_masks_equalclasses[[block]]
+        m = unwrap(lid_mask_wrapped)
+        
+        #mask planetscope raster using thinning and non-thinning masks
+        r_t = mask(r, m[[1]])
+        r_nt = mask(r, m[[2]])
+        
+        #calculate global stats for thinning pixels
+        d1 = global(r_t, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d1 = cbind(d1, 
+                   global(r_t, median, na.rm=T) |> rename(median = global)
+        )
+        d1[['block_pixel_stratum']] = 'Thinned'
+        d1[['v1']] = rownames(d1)
+        
+        #calculate global stats for non-thinning pixels
+        d2 = global(r_nt, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d2 = cbind(d2, 
+                   global(r_nt, median, na.rm=T) |> rename(median = global)
+        )
+        d2[['block_pixel_stratum']] = 'Not_thinned'
+        d2[['v1']] = rownames(d2)
+        
+        #total block stats
+        d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d3 = cbind(d3, 
+                   global(r, median, na.rm=T) |> rename(median = global)
+        )
+        d3[['block_pixel_stratum']] = 'Total'
+        d3[['v1']] = rownames(d3)
+        
+        #combine thinning, non-thinning, and global stats
+        d = rbind(d1,d2,d3)
+        
+        #get dataset
+        dataset = find_substring(x,dataset_strings)
+        d[['dataset']] = dataset
+        
+        #get block
+        d[['block_id']] = block
+        
+        #get date
+        date_ = find_substring(x, date_vector)
+        d[['acquisition_date']] = date_
+        
+        #filepath
+        d[['file_path']] = x
+        
+        #delta
+        d[['delta']] = str_detect(x, '_delta')
+        
+        ###statistical measures between groups
+        
+        v_t = values(r_t, dataframe=T) |> mutate(thinning = 'Thinned')
+        v_nt = values(r_nt, dataframe=T) |> mutate(thinning = 'Not_thinned') 
+        v_df = rbind(v_t, v_nt)
+        
+        feats = unique(d$v1)
+        feats = feats[!feats %in% c('max_DN', 'VARIgreen')] #don't run tests on max_DN
+        
+        tests_l = pblapply(feats, function(y){
+          
+          print(paste('Processing',y))
+          #subset values to test from dataframe
+          v = v_df |> select(all_of(c(y, 'thinning')))
+          v = v[!is.na(v[[y]]),] #remove NA values
+          v$thinning = as.factor(v$thinning)
+          
+          #initialize tibble to store results
+          test_df = tibble(
+            v1 = y,
+            levene_p = NA,
+            anderson_darling_p_thinning = NA,
+            anderson_darling_p_notthinning = NA,
+            anderson_darling_p_pooled = NA,
+            student_t_p = NA,
+            welch_t_p = NA,
+            mann_whitney_p = NA,
+            anova_p = NA,
+            kruskal_wallis_p = NA,
+            logistic_p = NA,
+            logistic_aic = NA,
+            logistic_AUC = NA,
+            fisher_discriminant_ratio = NA,
+            cohen_d = NA,
+            jeffries_matusita_dist = NA,
+            bhattacharya_dist = NA
+          )
+          
+          if(nrow(v)>0){ #proceed if there are rows in the dataframe (i.e. values that aren't na)
+            ##perform tests, store results in test_df
+            
+            #create formula and linear model
+            formula = as.formula(paste(y,'~ thinning'))
+            v_lm = lm(formula, v)
+            
+            #levene test
+            levene = leveneTest(formula, v)
+            test_df$levene_p = levene$`Pr(>F)`[1]
+            
+            #anderson-darling tests (if else statements handle cases when there is one unique value)
+            t = v[[y]][v$thinning == 'Thinned']
+            test_df$anderson_darling_p_thinning = if(length(unique(t)|length(t)<8) == 1) 0 else ad.test(t)$p.value
+            nt = v[[y]][v$thinning == 'Not_thinned']
+            test_df$anderson_darling_p_notthinning = if(length(unique(nt)|length(t)<8) == 1) 0 else ad.test(nt)$p.value
+            total = v[[y]]
+            test_df$anderson_darling_p_pooled = if(length(unique(total)|length(total)<8) == 1) 0 else ad.test(total)$p.value
+            
+            #Students t-test
+            s_t = t.test(formula, v)
+            test_df$student_t_p = s_t$p.value
+            
+            #Welch's t-test
+            w_t = t.test(formula, v, var.equal = F)
+            test_df$welch_t_p = w_t$p.value
+            
+            #Mann-Whitney U test
+            mw = wilcox.test(formula, v)
+            test_df$mann_whitney_p = mw$p.value
+            
+            #ANOVA
+            anv = anova(v_lm)
+            test_df$anova_p = anv$`Pr(>F)`[1]
+            
+            #Kruskal-Wallis
+            kw = kruskal.test(formula, v)
+            test_df$kruskal_wallis_p = kw$p.value
+            
+            #logistic regression model
+            log_form = paste('thinning ~', y)
+            log_m = glm(log_form, v, family = 'binomial')
+            log_m_summ = summary(log_m)
+            
+            test_df$logistic_p = log_m_summ$coefficients[,4][[y]]
+            test_df$logistic_aic = log_m_summ$aic
+            
+            log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
+            log_roc = roc(thinning ~ predictions, log_p, quiet=T)
+            test_df$logistic_AUC = as.numeric(auc(log_roc))
+            
+            #Fisher discriminant ratio
+            fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
+            test_df$fisher_discriminant_ratio = fdr
+            
+            #Cohen's d
+            pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
+                                (d2$notNA[d2$v1 == y] - 1) * d2$sd[d2$v1 == y]^2) /
+                               (d1$notNA[d1$v1 == y] + d2$notNA[d2$v1 == y] - 2))
+            cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
+            test_df$cohen_d = cohen_d
+            
+            #Jeffries-Matusita distance
+            jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
+            test_df$jeffries_matusita_dist = jmd$jmdist
+            
+            #Bhattacharya distance
+            bhat = BHATdist(g = v$thinning, X = tibble(v[[y]]))
+            test_df$bhattacharya_dist = bhat$bhatdist
+            
+            #I 
+          }
+          
+          #return results dataframe
+          return(test_df)
+        })
+        test_results = bind_rows(tests_l)
+        
+        ###attach statistical test results to the summary stats dataframe
+        
+        d = d %>% left_join(test_results, by = 'v1')
+        
+        ####return final result
+        return(d)
+      }
+      ,cl = 'future'
+      )
+      
+      results_df = bind_rows(df_l)
+      
+      write_csv(results_df, data_filename)
+      
+      plan('sequential')
     }
-    ,cl = 'future'
-    )
-    
-    results_df = bind_rows(df_l)
-    
-    write_csv(results_df, data_filename)
-    
-    plan('sequential')
   }
-  #----process combined data----
+  #----clean and process dataframe----
   {
     results_df = read_csv(data_filename) %>%
       #reformat dates
@@ -983,8 +984,16 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
       mutate(harvest_date = as.Date(paste0(harvest_month, '-01')))
     #calculate time since harvest
     results_df = results_df |>
-      mutate(months_since_harvest = as.numeric(acquisition_date2 - harvest_date)/30.44)
+      mutate(months_since_harvest = as.numeric(acquisition_date2 - harvest_date)/30.44) |>
+      mutate(harvested = ifelse(acquisition_date2 < harvest_date,0,1)) |>
+      left_join(tibble(acquisition_date2 = sort(unique(results_df$acquisition_date2)),
+                       acquisition_date_ordinal = as.numeric(1:length(unique(results_df$acquisition_date2)))))
+    #rescale JM distance to give it the range [0-1] so that beta regression can be applied to both AUC and JMD
+    results_df = results_df |>
+      mutate(jmd_scaled = jeffries_matusita_dist/sqrt(2))
     
+    #make dataframe that only has the results from the tests (i.e. remove unnecessary rows)
+    test_results_df = results_df |> filter(block_pixel_stratum == 'Total') |> dplyr:: select(-block_pixel_stratum)
   }
   #----plotting vegetation indices over time----
   {
@@ -1029,7 +1038,8 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
       'logistic_AUC',
       'fisher_discriminant_ratio',
       'cohen_d',
-      'jeffries_matusita_dist'
+      'jeffries_matusita_dist',
+      'divergence'
     )
     
     datasets_ = c(
@@ -1092,7 +1102,7 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
       ggtitle(unique(subset_df$dataset))+
       theme_classic()
     
-    #seperability test results
+    #logistic_AUC results
     log_p = ggplot(subset_df |> filter(block_pixel_stratum == 'Thinned') #remove redundant info (since thinning, not_thinning, and total have same stats info)
                    , aes(x = acquisition_date2, y = logistic_AUC)) +
       geom_point()+
@@ -1114,61 +1124,257 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
       ggtitle(unique(subset_df$dataset))+
       theme_classic()
     
+    #jeffries-matusita results
+    jm_p = ggplot(subset_df |> filter(block_pixel_stratum == 'Thinned') #remove redundant info (since thinning, not_thinning, and total have same stats info)
+                  , aes(x = acquisition_date2, y = jmd_scaled)) +
+      geom_point()+
+      geom_line()+
+      # scale_shape_manual(name = "Model Significance", values = c("Significant Model" = 8))+
+      scale_x_date(
+        date_breaks = "1 year",       # Major tick marks every year
+        date_labels = "%Y %m",           # Year labels on major ticks
+        date_minor_breaks = "1 month" # Minor tick marks every month
+      )+
+      facet_grid(rows = vars(block_id), cols = vars(var_name)
+                 , scales = 'free'
+      ) +
+      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
+      ggtitle(unique(subset_df$dataset))+
+      theme_classic()
+    
     library(patchwork)
-    pixels_p+log_p+plot_layout(guides = 'collect')
+    pixels_p+log_p+jm_p+plot_layout(guides = 'collect')
   }
   
-  #----use GAM to assess seperability before and after harvesting----
-  
-  # #check what distribution best fits the data
-  # samp = results_df |> filter(dataset == 'Z',
-  #                             var_name == 'blue') 
-  # fit_beta = fitdistrplus::fitdist(samp$logistic_AUC, 'beta') #beta is the choice since the range of possible values are [0-1]
-  # fit_gamma = fitdistrplus::fitdist(samp$logistic_AUC, 'gamma')
-  # 
-  # ps_feats = unique(results_df$var_name)
-  # ps_feats = ps_feats[!ps_feats %in% c('VARIgreen', 'max_DN')]
-  # datasets = unique(results_df$dataset)
-  # 
-  # # plan('multisession', workers=8)
-  # dataset_gam_l = pblapply(datasets, function(x){
-  #   d = results_df |> filter(dataset == x)
-  #   feat_gam_l = pblapply(ps_feats, function(y){
-  #     d_ = d |> filter(var_name == y)
-  #     d_$block_id = as.factor(d_$block_id)
-  #     mod = gam(logistic_AUC ~ s(months_since_harvest) + s(block_id, bs = "re")
-  #               ,data = d_, family = betar())
-  #     return(mod)
-  #   })
-  #   names(feat_gam_l) = ps_feats
-  #   return(feat_gam_l)
-  # }
-  # # ,cl = 'future'
-  # )
-  # # plan('sequential')
-  # 
-  # names(dataset_gam_l) = datasets
-  # 
-  # #compare with glms
-  # plan('multisession', workers=8)
-  # dataset_glm_l = pblapply(datasets, function(x){
-  #   d = results_df |> filter(dataset == x)
-  #   feat_glm_l = pblapply(ps_feats, function(y){
-  #     d_ = d |> filter(var_name == y)
-  #     d_$block_id = as.factor(d_$block_id)
-  #     mod = betareg(logistic_AUC ~ months_since_harvest + (1|block_id)
-  #               ,data = d_)
-  #     return(mod)
-  #   })
-  #   names(feat_glm_l) = ps_feats
-  #   return(feat_glm_l)
-  # }
-  # ,cl = 'future'
-  # )
-  # plan('sequential')
-  # names(dataset_glm_l) = datasets
+  #----statistical modelling to assess effect of harvesting on class separability---
+  {
+    #define features and datasets that should be tested
+    ps_feats = unique(test_results_df$var_name)
+    ps_feats = ps_feats[!ps_feats %in% c('VARIgreen', 'max_DN', 'max')]
+    
+    datasets = unique(test_results_df$dataset)
+    datasets = datasets[datasets %in% c('Z', 'Non-normalized', 'SM', 'Zrobust')]
+    
+    block_ids = unique(test_results_df$block_id)
+    
+    #----GLMs for AUC and JM distance----
+    
+    library(brms)
+    
+    jmd_lm_list = pblapply(1:length(datasets), function(i){
+      
+      dsi = datasets[i]
+      
+      lm_l = pblapply(1:length(ps_feats), function(j){
+        
+        varj = ps_feats[j]
+        
+        #print for debugging
+        print(paste0(
+          'Processing ',i,'-',j,', ',dsi,'-',varj
+        ))
+        
+        dat = test_results_df |> filter(dataset == dsi,
+                                        var_name == varj)
+        
+        
+        jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+                         , data = dat
+                         ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
+        return(jmd_lm)
+      })
+      names(lm_l) = ps_feats
+      return(lm_l)
+    })
+    names(jmd_lm_list) = datasets
+    
+    auc_lm_list = pblapply(1:length(datasets), function(i){
+      
+      dsi = datasets[i]
+      
+      lm_l = pblapply(1:length(ps_feats), function(j){
+        
+        varj = ps_feats[j]
+        
+        #print for debugging
+        print(paste0(
+          'Processing ',i,'-',j,', ',dsi,'-',varj
+        ))
+        
+        dat = test_results_df |> filter(dataset == dsi,
+                                        var_name == varj)
+        
+        auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+                         , data = dat
+                         ,family=beta_family(link="logit"))
+        return(auc_lm)
+      })
+      names(lm_l) = ps_feats
+      return(lm_l)
+    })
+    names(auc_lm_list) = datasets
+    
+    #----assess autocorrelation in the time series----
+    
+    #make time series objects
+    jmd_ts_l = pblapply(1:length(datasets), function(i){
+      
+      dsi = datasets[i]
+      
+      v_l = pblapply(1:length(ps_feats), function(j){
+        
+        varj = ps_feats[j]
+        
+        b_l = pblapply(1:length(block_ids), function(k){
+          
+          blockk = block_ids[k]
+          
+          #print for debugging
+          print(paste0(
+            'Processing ',i,' - ',j,' - ','k', ', ',dsi,' - ',varj,' - ',blockk
+          ))
+          
+          dat = test_results_df |> 
+            filter(dataset == dsi,
+                   var_name == varj,
+                   block_id == blockk) |>
+            arrange(acquisition_date_ordinal)
+          
+          jmd_ts = ts(dat$jeffries_matusita_dist, start = min(dat$acquisition_date2), frequency = length(unique(dat$acquisition_date2)))
+          return(jmd_ts)
+          
+        })
+        names(b_l) = block_ids
+        return(b_l)
+      })
+      names(v_l) = ps_feats
+      return(v_l)
+    })
+    names(jmd_ts_l) = datasets
+    
+    auc_ts_l = pblapply(1:length(datasets), function(i){
+      
+      dsi = datasets[i]
+      
+      v_l = pblapply(1:length(ps_feats), function(j){
+        
+        varj = ps_feats[j]
+        
+        b_l = pblapply(1:length(block_ids), function(k){
+          
+          blockk = block_ids[k]
+          
+          #print for debugging
+          print(paste0(
+            'Processing ',i,' - ',j,' - ','k', ', ',dsi,' - ',varj,' - ',blockk
+          ))
+          
+          dat = test_results_df |> 
+            filter(dataset == dsi,
+                   var_name == varj
+                   ,block_id == blockk
+            ) |>
+            arrange(acquisition_date_ordinal)
+          
+          auc_ts = ts(dat$logistic_AUC, start = min(dat$acquisition_date2), frequency = 12
+                      # length(unique(dat$acquisition_date2))
+          )
+          return(auc_ts)
+          
+        })
+        names(b_l) = block_ids
+        return(b_l)
+      })
+      names(v_l) = ps_feats
+      return(v_l)
+    })
+    names(auc_ts_l) = datasets
+    
+    #assess autocorrelation functions for several objects
+    acf(jmd_ts_l$Z$BI$`12L_C7`)
+    
+    a = acf(auc_ts_l$Z$BI$`12L_D345`)
+    
+    #----multivariate interrupted time series models ----
+    {
+      # library(brms)
+      library(ordbetareg)
+      
+      mits_string = 'MITS_models_OrderedBeta_AR(1)'
+      mits_dir = paste0(bm_dir,'/',mits_string)
+      dir.check(mits_dir)
+      
+      #fit model for each combination of dataset and feature
+      pblapply(1:length(datasets), function(i){
+        
+        ds_i = datasets[i] 
+        dat_ds = results_df |> 
+          filter(dataset == ds,
+                 block_pixel_stratum == 'Total') #do this filter else will have redundant points
+        
+        ds_dir = paste0(mits_dir, '/', ds_i)
+        dir.check(ds_dir)
+        
+        pblapply(1:length(ps_feats), function(j){
+          
+          var_j = ps_feats[j]
+          dat_ds_var = dat_ds |> filter(var_name == var_j)
+          
+          #print for debugging
+          print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
+          
+          filename = paste0(dsm_dir, '/',var_j,'.rds')
+          if(!file.exists(filename)){
+            
+            # # Model formula for Jeffries-Matusita (scaled between 0 and 2)
+            # jm_formula <- bf(
+            #   jmd_scaled ~ acquisition_date_ordinal * harvested + (1 | block_id),
+            #   autocor = ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
+            # )
+            # 
+            # # Model formula for AUC (scaled between 0 and 1)
+            # auc_formula <- bf(
+            #   logistic_AUC ~ acquisition_date_ordinal * harvested + (1 | block_id),
+            #   autocor = ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
+            # )
+            
+            #formulate multivariate model
+            mv_form = bf(
+              mvbind(jmd_scaled, logistic_AUC) ~ 
+                acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id) 
+              # + cor_ar(~ acquisition_date_ordinal | block_id, p = 1)
+              + ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
+            )
+            
+            # Fit the multivariate model
+            
+            # m <- brm(
+            #   mv_form + set_rescor(TRUE),  # allow residuals to be correlated
+            #   data = dat_ds_var,
+            #   family = gaussian(),  # or consider beta family if you rescale to (0,1)
+            #   chains = 4, cores = 8, iter = 4000,
+            #   control = list(adapt_delta = 0.95)  # helps with convergence in complex models
+            # )
+            
+            m = ordbetareg(
+              mv_form
+              # + set_rescor(TRUE)
+              ,  # allow residuals to be correlated
+              data = dat_ds_var,
+              true_bounds = c(0,1),
+              chains = 4, cores = 8, iter = 4000,
+              control = list(adapt_delta = 0.95)  # helps with convergence in complex models
+            )
+            
+            saveRDS(m, filename)
+          }
+        })
+      })
+      
+    }
+    
+  }
 }
-
 #----timeseries analysis using raw pixel values
 {
   data_string = 'RawBasemapValues_withCHM_withXY_cleaned.parquet'
@@ -1282,7 +1488,7 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
   }
   
   #----separate into multiple parquet files based on dataset to speed up processing----
-  rawvals_dir = paste0(bm_dir,'/','RawValues_parquets_cleaned')
+  rawvals_dir = paste0(bm_dir,'/','RawValues_parquets_withXY_cleaned')
   if(!dir.exists(rawvals_dir)){
     dir.check(rawvals_dir)
     results2_df = open_dataset(data_filename) |>
@@ -1551,73 +1757,73 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
   
   ##using arrow dataset (i.e. library of parquet files, quite slow)
   {
-  # #get vector of dataset names
-  # datasets = results2_df |>
-  #   dplyr::select(dataset) |>
-  #   distinct()|>
-  #   collect()
-  # datasets = datasets$dataset
-  # 
-  # #vector of features to test
-  # ps_feats = c('blue', 'green', 'red', 'Hue', 'GCC', 'NDGR', 'BI', 'CI', 'CRI550', 'GLI', 'TVI')
-  # 
-  # #reformat harvest dates
-  # harvest_dates_df = harvest_dates_df |>
-  #   mutate(harvest_date = as.Date(paste0(harvest_month,'-01')))
-  # 
-  # #create directory to store models
-  # lm_dir_string = 'linear_mixed_models_bydataset_byfeat_binaryharvest_binarythinning'
-  # lm_dir = paste0(bm_dir, '/',lm_dir_string)
-  # dir.check(lm_dir)
-  # 
-  # #create and save models
-  # 
-  # 
-  # # feat_lm_l = 
-  # pblapply(datasets, function(x){
-  #   
-  #   d = results2_df |>
-  #     filter(dataset == x)|>
-  #     #get time since harvest
-  #     left_join(harvest_dates_df, by = 'block_id') |>
-  #     # collect()|>
-  #     # mutate(months_since_harvest = as.numeric(acquisition_date - harvest_date, units='days')/30.44) |>
-  #     mutate(harvested = ifelse(acquisition_date >= harvest_date, 1,0))|> #binary harvesting variable
-  #     #classify CHM data using harvest threshold
-  #     mutate(thinning_pixel = ifelse(is.na(CHM_change), NA,
-  #                                    ifelse(CHM_change < harvest_threshold, 1, 0))) #binary thinning variable
-  #   subdir = paste0(lm_dir,'/',x)
-  #   dir.check(subdir)
-  #   
-  #   # f_l = 
-  #   pblapply(ps_feats, function(y){
-  #     
-  #     print(paste0('Processing ',x,'-',y))
-  #     filename = paste0(subdir,'/',y,'.rds')
-  #     if(!file.exists(filename)){
-  #       d_ = d |>
-  #         filter(!is.na(!!sym(y))) |>
-  #         dplyr::select(all_of(c(y, 'thinning_pixel', 'block_id', 'harvested'))) |>
-  #         collect()
-  #       
-  #       # formula = as.formula(paste(y,'~ thinning_pixel * harvested * block_id + (1|block_id)'))
-  #       # mod = lmer(formula, data = d)
-  #       
-  #       formula = as.formula(paste( y,'~ thinning_pixel* harvested + thinning_pixel + harvested + (1|block_id)'))
-  #       mod = lmer(formula, data = d_)
-  #       saveRDS(mod, file = filename)
-  #     }
-  #     
-  #     # return(mod)
-  #   }
-  #   )
-  #   # names(f_l) = ps_feats
-  #   # return(f_l)
-  # })
+    # #get vector of dataset names
+    # datasets = results2_df |>
+    #   dplyr::select(dataset) |>
+    #   distinct()|>
+    #   collect()
+    # datasets = datasets$dataset
+    # 
+    # #vector of features to test
+    # ps_feats = c('blue', 'green', 'red', 'Hue', 'GCC', 'NDGR', 'BI', 'CI', 'CRI550', 'GLI', 'TVI')
+    # 
+    # #reformat harvest dates
+    # harvest_dates_df = harvest_dates_df |>
+    #   mutate(harvest_date = as.Date(paste0(harvest_month,'-01')))
+    # 
+    # #create directory to store models
+    # lm_dir_string = 'linear_mixed_models_bydataset_byfeat_binaryharvest_binarythinning'
+    # lm_dir = paste0(bm_dir, '/',lm_dir_string)
+    # dir.check(lm_dir)
+    # 
+    # #create and save models
+    # 
+    # 
+    # # feat_lm_l = 
+    # pblapply(datasets, function(x){
+    #   
+    #   d = results2_df |>
+    #     filter(dataset == x)|>
+    #     #get time since harvest
+    #     left_join(harvest_dates_df, by = 'block_id') |>
+    #     # collect()|>
+    #     # mutate(months_since_harvest = as.numeric(acquisition_date - harvest_date, units='days')/30.44) |>
+    #     mutate(harvested = ifelse(acquisition_date >= harvest_date, 1,0))|> #binary harvesting variable
+    #     #classify CHM data using harvest threshold
+    #     mutate(thinning_pixel = ifelse(is.na(CHM_change), NA,
+    #                                    ifelse(CHM_change < harvest_threshold, 1, 0))) #binary thinning variable
+    #   subdir = paste0(lm_dir,'/',x)
+    #   dir.check(subdir)
+    #   
+    #   # f_l = 
+    #   pblapply(ps_feats, function(y){
+    #     
+    #     print(paste0('Processing ',x,'-',y))
+    #     filename = paste0(subdir,'/',y,'.rds')
+    #     if(!file.exists(filename)){
+    #       d_ = d |>
+    #         filter(!is.na(!!sym(y))) |>
+    #         dplyr::select(all_of(c(y, 'thinning_pixel', 'block_id', 'harvested'))) |>
+    #         collect()
+    #       
+    #       # formula = as.formula(paste(y,'~ thinning_pixel * harvested * block_id + (1|block_id)'))
+    #       # mod = lmer(formula, data = d)
+    #       
+    #       formula = as.formula(paste( y,'~ thinning_pixel* harvested + thinning_pixel + harvested + (1|block_id)'))
+    #       mod = lmer(formula, data = d_)
+    #       saveRDS(mod, file = filename)
+    #     }
+    #     
+    #     # return(mod)
+    #   }
+    #   )
+    #   # names(f_l) = ps_feats
+    #   # return(f_l)
+    # })
   }
   
   
-  #using single parquet file
+  #using single parquet file (somehow even slower than using the parquet dataset :/ )
   results_pixels_df = setDT(read_parquet(data_filename)) #load and make data.table
   datasets = unique(results_pixels_df$dataset)
   ps_feats = c('blue', 'green', 'red', 'Hue', 'GCC', 'NDGR', 'BI', 'CI', 'CRI550', 'GLI', 'TVI')
@@ -1666,9 +1872,11 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
   #load linear models for Z-score dataset
   lm_subdirs = list.dirs(lm_dir)
   lm_subdirs = lm_subdirs[lm_subdirs != lm_dir]
-  datset_names = basename(lm_subdirs)
+  dataset_names = basename(lm_subdirs)
   
-  z_lm_l = pblapply(lm_subdirs[basename(lm_subdirs) %in% c('Z', 'Non-normalized')], function(x){
+  z_lm_l = pblapply(lm_subdirs[basename(lm_subdirs) %in% c('Z'
+                                                           # , 'Non-normalized'
+  )], function(x){
     files_list = list.files(x, full.names = T, recursive = T)
     file_names = basename(file_path_sans_ext(files_list))
     
@@ -1676,6 +1884,11 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
     names(m_l) = file_names
     return(m_l)
   })
+  names(z_lm_l) = dataset_names
+  
+  
+  a = readRDS(files_list[1])
+  
   
   
 }
