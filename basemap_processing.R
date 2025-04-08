@@ -18,7 +18,6 @@ library(pROC)
 library(varSel)
 library(tseries)
 library(lme4)
-library(mgcv)
 library(glmmTMB)
 #extra functions
 source('helper_functions.R')
@@ -450,184 +449,6 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
   })
   
   
-  
-}
-
-#----timeseries analysis by block
-{
-  #----set up for processing----
-  
-  #get list of all files
-  dirs = c(
-    #change data
-    dz_dir,
-    dzr_dir,
-    dsm_dir,
-    dn_dir
-    #no-change data
-    ,z_dir
-    ,zr_dir
-    ,sm_dir
-    ,nonorm_dir
-  )
-  
-  all_files <- unlist(sapply(dirs, list.files, pattern = "\\.tif$", full.names = TRUE, recursive = TRUE))
-  
-  #get vector of all possible dates in timeseries
-  start_date <- as.Date("2021-01-01")
-  end_date <- as.Date("2024-12-31")
-  date_vector <- seq.Date(from = start_date, to = end_date, by = "month")
-  date_vector <- format(date_vector, "%Y-%m")
-  date_vector = as.character(date_vector)
-  date_vector = str_replace_all(date_vector,'-','_')
-  
-  #all possible datasets (strings to look for in filepaths to tell what dataset a raster belongs to)
-  dataset_strings <- str_extract(dirs, "BlockClipped.*") %>% paste0('/') #add '/' to avoid confusion where some datasets are substrings of others
-  
-  #block ids
-  block_ids = blocks_p$BLOCKNUM
-  
-  #----Turn each raster into a dataframe with global statistics----
-  
-  data_string = 'Global_Stats_nomask'
-  data_filename = paste0(bm_dir,'/',data_string,'.csv')
-  
-  if(!file.exists(data_filename)){
-    
-    # plan('multisession', workers = 8)
-    
-    df_l = pblapply(all_files, function(x){
-      
-      # print(paste('Processing', x)) #uncomment to identify files where processing fails
-      
-      r = rast(x)
-      d = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      
-      #get dataset
-      dataset = find_substring(x,dataset_strings)
-      d[['dataset']] = dataset
-      
-      #get block
-      block = find_substring(x,block_ids)
-      d[['block_id']] = block
-      
-      #get date
-      date_ = find_substring(x, date_vector)
-      d[['acquisition_date']] = date_
-      
-      #filepath
-      d[['path']] = x
-      
-      #rownames
-      d[['v1']] = rownames(d)
-      
-      #delta
-      d[['delta']] = str_detect(x, '_delta')
-      
-      return(d)
-    })
-    
-    results1_df = bind_rows(df_l)
-    
-    write.csv(results1_df, data_filename)
-    
-    # plan('sequential')
-  }
-  
-  #----process combined data----
-  results1_df = read_csv(data_filename) %>%
-    #reformat dates
-    mutate(
-      year = str_remove(acquisition_date, '_.*'), 
-      month = str_remove(acquisition_date, '.*_')
-    ) %>%
-    mutate(acquisition_date2 = as.Date(paste0(year,'-',month,'-01'))
-    ) %>%
-    mutate(julian_day = yday(acquisition_date2)
-    ) %>%
-    #modify variable names
-    mutate(var_name = str_remove(v1, '_.*')) %>%
-    # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
-    filter(var_name != 'max_DN') %>%
-    # fix dataset names
-    mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
-    mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
-    mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
-    mutate(dataset = str_remove(dataset, "^_")) %>%
-    mutate(dataset = str_remove(dataset, '/$'))
-  
-  
-  #----plotting vegetation indices over time----
-  
-  {
-    indices = c(
-      # "blue", "green", "red"
-      # ,
-      "Hue"
-      # ,
-      # "GCC"
-      ,
-      "NDGR"
-      # ,
-      # "BI",        
-      # "CI", "CRI550",   
-      # "GLI", "TVI"
-      # , "VARIgreen"
-    ) #vector of indices to look at
-    
-    blocks_ = c(
-      # "12L_C5",
-      "12L_D345"
-      # ,  "12L_C4",    "12L_C7",    "12L_B8C3",  "12N_T3",    "12N_1X1W",  "12N_V1"
-      ,"NoChange1.1_conifer", "NoChange1.2_conifer",
-      "NoChange4_conifer",   "NoChange5_conifer",  
-      "NoChange6_conifer",   "NoChange7_conifer")
-    
-    datasets_ = c(
-      'Z','Z_delta','Zrobust', 'Zrobust_delta'
-    )
-    
-    months_ = c(
-      '01','02','03',
-      '04',
-      '05','06','07','08','09','10','11'
-      ,'12'
-    )
-    
-    harvest_dates_df = tibble(
-      block = blocks_[!str_detect(blocks_, 'NoChange')],
-      harvest_month = c('2023-02'
-                        ,'2022-07'
-                        ,'2023-02'
-                        ,'2023-02'
-                        ,'2023-02'
-                        ,'2023-02'
-                        ,'2024-03'
-                        ,'2024-03')
-      ,note = c('-','-','-','-','-','partial, complete 2023-03','-','partial, complete 2024-04')
-    )
-    
-    
-    
-    subset_df = results1_df %>% 
-      filter(var_name %in% indices
-             , str_detect(block_id, paste(blocks_, collapse = "|"))
-             , dataset %in% datasets_
-             , month %in% months_)
-    
-    ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
-      geom_point(aes(color = block_type))+
-      geom_line(aes(color = block_id))+
-      # geom_ribbon(aes(x = acquisition_date, ymin = mean-sds, ymax = mean+sds))+
-      scale_x_date(
-        date_breaks = "1 year",       # Major tick marks every year
-        date_labels = "%Y %m",           # Year labels on major ticks
-        date_minor_breaks = "1 month" # Minor tick marks every month
-      )+
-      facet_grid(rows = vars(dataset), cols = vars(var_name), scales = 'free') +
-      geom_vline(xintercept = as.Date('2022-07-01')) +
-      ggtitle('Change from previous image')
-  }
   
 }
 
@@ -1159,60 +980,58 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
     
     #----GLMs for AUC and JM distance----
     
-    library(brms)
-    
-    jmd_lm_list = pblapply(1:length(datasets), function(i){
-      
-      dsi = datasets[i]
-      
-      lm_l = pblapply(1:length(ps_feats), function(j){
-        
-        varj = ps_feats[j]
-        
-        #print for debugging
-        print(paste0(
-          'Processing ',i,'-',j,', ',dsi,'-',varj
-        ))
-        
-        dat = test_results_df |> filter(dataset == dsi,
-                                        var_name == varj)
-        
-        
-        jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
-                         , data = dat
-                         ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
-        return(jmd_lm)
-      })
-      names(lm_l) = ps_feats
-      return(lm_l)
-    })
-    names(jmd_lm_list) = datasets
-    
-    auc_lm_list = pblapply(1:length(datasets), function(i){
-      
-      dsi = datasets[i]
-      
-      lm_l = pblapply(1:length(ps_feats), function(j){
-        
-        varj = ps_feats[j]
-        
-        #print for debugging
-        print(paste0(
-          'Processing ',i,'-',j,', ',dsi,'-',varj
-        ))
-        
-        dat = test_results_df |> filter(dataset == dsi,
-                                        var_name == varj)
-        
-        auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
-                         , data = dat
-                         ,family=beta_family(link="logit"))
-        return(auc_lm)
-      })
-      names(lm_l) = ps_feats
-      return(lm_l)
-    })
-    names(auc_lm_list) = datasets
+    # jmd_lm_list = pblapply(1:length(datasets), function(i){
+    #   
+    #   dsi = datasets[i]
+    #   
+    #   lm_l = pblapply(1:length(ps_feats), function(j){
+    #     
+    #     varj = ps_feats[j]
+    #     
+    #     #print for debugging
+    #     print(paste0(
+    #       'Processing ',i,'-',j,', ',dsi,'-',varj
+    #     ))
+    #     
+    #     dat = test_results_df |> filter(dataset == dsi,
+    #                                     var_name == varj)
+    #     
+    #     
+    #     jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+    #                      , data = dat
+    #                      ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
+    #     return(jmd_lm)
+    #   })
+    #   names(lm_l) = ps_feats
+    #   return(lm_l)
+    # })
+    # names(jmd_lm_list) = datasets
+    # 
+    # auc_lm_list = pblapply(1:length(datasets), function(i){
+    #   
+    #   dsi = datasets[i]
+    #   
+    #   lm_l = pblapply(1:length(ps_feats), function(j){
+    #     
+    #     varj = ps_feats[j]
+    #     
+    #     #print for debugging
+    #     print(paste0(
+    #       'Processing ',i,'-',j,', ',dsi,'-',varj
+    #     ))
+    #     
+    #     dat = test_results_df |> filter(dataset == dsi,
+    #                                     var_name == varj)
+    #     
+    #     auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+    #                      , data = dat
+    #                      ,family=beta_family(link="logit"))
+    #     return(auc_lm)
+    #   })
+    #   names(lm_l) = ps_feats
+    #   return(lm_l)
+    # })
+    # names(auc_lm_list) = datasets
     
     #----assess autocorrelation in the time series----
     
@@ -1296,23 +1115,25 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
     a = acf(auc_ts_l$Z$BI$`12L_D345`)
     
     #----multivariate interrupted time series models ----
-    {
+    
       # library(brms)
+      library(brms)
       library(ordbetareg)
       
-      mits_string = 'MITS_models_OrderedBeta_AR(1)'
-      mits_dir = paste0(bm_dir,'/',mits_string)
-      dir.check(mits_dir)
+      ####GAUSSIAN REGRESSION
+      mits_g_string = 'MITS_models_Gaussian_AR(1)'
+      mits_g_dir = paste0(bm_dir,'/',mits_g_string)
+      dir.check(mits_g_dir)
       
-      #fit model for each combination of dataset and feature
+      #fit regression models for each combination of dataset and feature
       pblapply(1:length(datasets), function(i){
         
         ds_i = datasets[i] 
         dat_ds = results_df |> 
-          filter(dataset == ds,
+          filter(dataset == ds_i,
                  block_pixel_stratum == 'Total') #do this filter else will have redundant points
         
-        ds_dir = paste0(mits_dir, '/', ds_i)
+        ds_dir = paste0(mits_g_dir, '/', ds_i)
         dir.check(ds_dir)
         
         pblapply(1:length(ps_feats), function(j){
@@ -1323,7 +1144,79 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
           #print for debugging
           print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
           
-          filename = paste0(dsm_dir, '/',var_j,'.rds')
+          filename = paste0(ds_dir, '/',var_j,'.rds')
+          if(!file.exists(filename)){
+            
+            # # Model formula for Jeffries-Matusita (scaled between 0 and 2)
+            # jm_formula <- bf(
+            #   jmd_scaled ~ acquisition_date_ordinal * harvested + (1 | block_id),
+            #   autocor = ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
+            # )
+            # 
+            # # Model formula for AUC (scaled between 0 and 1)
+            # auc_formula <- bf(
+            #   logistic_AUC ~ acquisition_date_ordinal * harvested + (1 | block_id),
+            #   autocor = ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
+            # )
+            
+            #formulate multivariate model
+            mv_form = bf(
+              mvbind(jmd_scaled, logistic_AUC) ~ 
+                acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id) 
+              # + cor_ar(~ acquisition_date_ordinal | block_id, p = 1)
+              + ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
+            )
+            
+            # Fit the multivariate model
+            
+            m <- brm(
+              mv_form + set_rescor(TRUE),  # allow residuals to be correlated
+              data = dat_ds_var,
+              family = gaussian(),  # or consider beta family if you rescale to (0,1)
+              chains = 4, cores = 8, iter = 4000,
+              control = list(adapt_delta = 0.95)  # helps with convergence in complex models
+            )
+            
+            # m = ordbetareg(
+            #   mv_form
+            #   # + set_rescor(TRUE)
+            #   ,  # allow residuals to be correlated
+            #   data = dat_ds_var,
+            #   true_bounds = c(0,1),
+            #   chains = 4, cores = 8, iter = 4000,
+            #   control = list(adapt_delta = 0.95)  # helps with convergence in complex models
+            # )
+            
+            saveRDS(m, filename)
+          }
+        })
+      })
+      
+      ####ORDERED BETA REGRESSION
+      mits_ob_string = 'MITS_models_OrderedBeta_AR(1)'
+      mits_ob_dir = paste0(bm_dir,'/',mits_ob_string)
+      dir.check(mits_ob_dir)
+      
+      #fit beta regression models for each combination of dataset and feature
+      pblapply(1:length(datasets), function(i){
+        
+        ds_i = datasets[i] 
+        dat_ds = results_df |> 
+          filter(dataset == ds_i,
+                 block_pixel_stratum == 'Total') #do this filter else will have redundant points
+        
+        ds_dir = paste0(mits_ob_dir, '/', ds_i)
+        dir.check(ds_dir)
+        
+        pblapply(1:length(ps_feats), function(j){
+          
+          var_j = ps_feats[j]
+          dat_ds_var = dat_ds |> filter(var_name == var_j)
+          
+          #print for debugging
+          print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
+          
+          filename = paste0(ds_dir, '/',var_j,'.rds')
           if(!file.exists(filename)){
             
             # # Model formula for Jeffries-Matusita (scaled between 0 and 2)
@@ -1371,10 +1264,11 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
         })
       })
       
-    }
+    
     
   }
 }
+
 #----timeseries analysis using raw pixel values
 {
   data_string = 'RawBasemapValues_withCHM_withXY_cleaned.parquet'
