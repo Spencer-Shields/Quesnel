@@ -2,6 +2,7 @@ library(tidyverse)
 library(terra)
 library(tools)
 library(pbapply)
+library(Rcpp)
 source('helper_functions.R')
 library(tidyterra)
 source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/check_radiometric_consistency.R')
@@ -85,10 +86,6 @@ lapply(1:length(change_rasts_l), function(i){
 })
 
 
-#----save change validation rasters which are cropped to the blocks, resampled and reprojected to match basemap data----
-
-
-
 #----Look at histograms of difference rasters to establish harvest threshold----
 
 change_rasts_clipped = pblapply(1:length(change_rasts_l), function(i){
@@ -121,6 +118,7 @@ change_df = change_df %>%
 ggplot(data = change_df)+
   geom_density(aes(x = vals.Z))+
   geom_vline(aes(xintercept = otsu_threshold, linetype = 'Otsu threshold'))+
+  xlab("Height change (m)")+
   facet_grid(vars(block))
 
 #----save change validation rasters which are cropped to the blocks, resampled and reprojected to match basemap data----
