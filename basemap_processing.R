@@ -1,3 +1,5 @@
+#----packages
+{
 library(tidyverse)
 library(terra)
 library(RStoolbox)
@@ -23,8 +25,9 @@ library(glmmTMB)
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
 source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/check_radiometric_consistency.R')
+}
 
-#----data preprocessing
+#----data preprocessing, directory setup
 {
   #----load and examine basemap data----
   bm_dir = 'data/planet_basemaps/global_monthly'
@@ -456,7 +459,8 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
 {
   #extract stats from remote sensing data
   {
-    harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
+    # harvest_threshold = -5.2 #the drop in height (in m) for a pixel to be considered "harvested". -5.2 = average Otsu threshold based on 0.25m raster
+    harvest_threshold = -1
     
     data_string = paste0('GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'m','_withTests_EqualClasses')
     data_filename = paste0(bm_dir,'/',data_string,'.csv')
@@ -972,7 +976,6 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
   }
   
   #----statistical modelling to assess effect of harvesting on class separability----
-  {
     #define features and datasets that should be tested
     ps_feats = unique(test_results_df$var_name)
     ps_feats = ps_feats[!ps_feats %in% c('VARIgreen', 'max_DN', 'max')]
@@ -982,60 +985,127 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
     
     block_ids = unique(test_results_df$block_id)
     
-    #----GLMs for AUC and JM distance----
+    #----LMMs for AUC and JM distance----
     
-    # jmd_lm_list = pblapply(1:length(datasets), function(i){
-    #   
-    #   dsi = datasets[i]
-    #   
-    #   lm_l = pblapply(1:length(ps_feats), function(j){
-    #     
-    #     varj = ps_feats[j]
-    #     
-    #     #print for debugging
-    #     print(paste0(
-    #       'Processing ',i,'-',j,', ',dsi,'-',varj
-    #     ))
-    #     
-    #     dat = test_results_df |> filter(dataset == dsi,
-    #                                     var_name == varj)
-    #     
-    #     
-    #     jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
-    #                      , data = dat
-    #                      ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
-    #     return(jmd_lm)
-    #   })
-    #   names(lm_l) = ps_feats
-    #   return(lm_l)
-    # })
-    # names(jmd_lm_list) = datasets
-    # 
-    # auc_lm_list = pblapply(1:length(datasets), function(i){
-    #   
-    #   dsi = datasets[i]
-    #   
-    #   lm_l = pblapply(1:length(ps_feats), function(j){
-    #     
-    #     varj = ps_feats[j]
-    #     
-    #     #print for debugging
-    #     print(paste0(
-    #       'Processing ',i,'-',j,', ',dsi,'-',varj
-    #     ))
-    #     
-    #     dat = test_results_df |> filter(dataset == dsi,
-    #                                     var_name == varj)
-    #     
-    #     auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
-    #                      , data = dat
-    #                      ,family=beta_family(link="logit"))
-    #     return(auc_lm)
-    #   })
-    #   names(lm_l) = ps_feats
-    #   return(lm_l)
-    # })
-    # names(auc_lm_list) = datasets
+    plan('multisession', workers = 8)
+    jmd_lm_list = pblapply(1:length(datasets), function(i){
+
+      dsi = datasets[i]
+
+      lm_l = pblapply(1:length(ps_feats), function(j){
+
+        varj = ps_feats[j]
+
+        #print for debugging
+        print(paste0(
+          'Processing ',i,'-',j,', ',dsi,'-',varj
+        ))
+
+        dat = test_results_df |> filter(dataset == dsi,
+                                        var_name == varj)
+
+
+        # jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+        #                  , data = dat
+        #                  ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
+        
+        jmd_lm = lmer(jmd_scaled ~ 1 + months_since_harvest * harvested + 
+                        (1 + months_since_harvest * harvested | block_id)
+                      , data = dat)
+        
+        return(jmd_lm)
+      })
+      names(lm_l) = ps_feats
+      return(lm_l)
+    }
+    ,cl = 'future'
+    )
+    names(jmd_lm_list) = datasets
+
+    auc_lm_list = pblapply(1:length(datasets), function(i){
+
+      dsi = datasets[i]
+
+      lm_l = pblapply(1:length(ps_feats), function(j){
+
+        varj = ps_feats[j]
+
+        #print for debugging
+        print(paste0(
+          'Processing ',i,'-',j,', ',dsi,'-',varj
+        ))
+
+        dat = test_results_df |> filter(dataset == dsi,
+                                        var_name == varj)
+
+        # auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+        #                  , data = dat
+        #                  ,family=beta_family(link="logit"))
+        
+        auc_lm = lmer(logistic_AUC ~ 1 + months_since_harvest * harvested + 
+                        (1 + months_since_harvest * harvested | block_id)
+                      , data = dat)
+        
+        return(auc_lm)
+      })
+      names(lm_l) = ps_feats
+      return(lm_l)
+    }
+    ,cl = 'future'
+    )
+    names(auc_lm_list) = datasets
+    plan('sequential')
+    
+    #extract model coefficients and other info
+    
+    extract_coefs_lme4 = function(L){ #L is a nested structure with lme4 models in lists according to feature in lists according to dataset
+      coefs_df_l = pblapply(datasets, function(x){
+        df_l = pblapply(ps_feats, function(y){
+          m = L[[x]][[y]]
+          s = summary(m)
+          coefs_df = s$coefficients |> as.data.frame()
+          coefs_df$model_terms = rownames(coefs_df)
+          coefs_df$AIC = AIC(m)
+          coefs_df$REML = REMLcrit(m)
+          coefs_df$dataset = x
+          coefs_df$var_name = y
+          
+          return(coefs_df)
+        })
+        df = bind_rows(df_l)
+        return(df)
+      })
+      df = bind_rows(coefs_df_l)
+      rownames(df) = NULL
+      return(df)
+    }
+    
+    jmd_coefs = extract_coefs_lme4(jmd_lm_list) |> 
+      mutate(Estimate_rounded = round(Estimate, 3)) |>
+      mutate(metric = 'Area Under Curve')
+    auc_coefs = extract_coefs_lme4(auc_lm_list) |> 
+      mutate(Estimate_rounded = round(Estimate, 3)) |>
+      mutate(metric = 'Jeffries-Matusita distance')
+    
+    coefs_combined_df = bind_rows(jmd_coefs, auc_coefs)
+    
+    #plot results
+    {
+      ggplot(data = auc_coefs |> filter(!model_terms %in% c('months_since_harvest', '(Intercept)')), aes(x = dataset, y = var_name))+
+        geom_tile(aes(fill = Estimate_rounded))+
+        geom_text(aes(label = Estimate_rounded))+
+        scale_fill_viridis_b()+
+        facet_grid(vars(model_terms))+
+        theme_classic()
+      
+      # ggplot(data = auc_coefs |> filter(model_terms %in% c('(Intercept)')), aes(x = dataset, y = var_name))+
+      #   geom_tile(aes(fill = Estimate_rounded))+
+      #   geom_text(aes(label = Estimate_rounded))+
+      #   scale_fill_viridis_b()+
+      #   facet_grid(vars(model_terms))+
+      #   theme_classic()
+    }
+    
     
     #----assess autocorrelation in the time series----
     
@@ -1063,7 +1133,9 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
                    block_id == blockk) |>
             arrange(acquisition_date_ordinal)
           
-          jmd_ts = ts(dat$jeffries_matusita_dist, start = min(dat$acquisition_date2), frequency = length(unique(dat$acquisition_date2)))
+          jmd_ts = ts(dat$jeffries_matusita_dist
+                      , start = min(dat$acquisition_date2)
+                      , frequency = 12)
           return(jmd_ts)
           
         })
@@ -1117,222 +1189,185 @@ source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometri
     acf(jmd_ts_l$Z$BI$`12L_C7`)
     
     a = acf(auc_ts_l$Z$BI$`12L_D345`)
+    b = acf(auc_ts_l$Z$BI$`12L_C5`)
     
-    #----multivariate interrupted time series models ----
+    #----multivariate interrupted time series models with bayesian regression (overkill) ----
     
+    # # library(brms)
     # library(brms)
-    library(brms)
-    library(ordbetareg)
+    # library(ordbetareg)
+    # 
+    # mv_form = bf(
+    #   mvbind(jmd_scaled, logistic_AUC) ~ 
+    #     months_since_harvest * harvested + (1 + months_since_harvest + harvested | block_id)
+    # )
+    # 
+    # # plan('multisession', workers = 6)
+    # ####ORDERED BETA REGRESSION
+    # {
+    #   mits_ob_string = 'MITS_models_OrderedBeta_AR(1)'
+    #   mits_ob_dir = paste0(bm_dir,'/',mits_ob_string)
+    #   dir.check(mits_ob_dir)
+    #   
+    #   #fit beta regression models for each combination of dataset and feature
+    #   pblapply(1:length(datasets), function(i){
+    #     
+    #     ds_i = datasets[i] 
+    #     dat_ds = results_df |> 
+    #       filter(dataset == ds_i,
+    #              block_pixel_stratum == 'Total') #do this filter else will have redundant points
+    #     
+    #     ds_dir = paste0(mits_ob_dir, '/', ds_i)
+    #     dir.check(ds_dir)
+    #     
+    #     pblapply(1:length(ps_feats), function(j){
+    #       
+    #       var_j = ps_feats[j]
+    #       dat_ds_var = dat_ds |> filter(var_name == var_j)
+    #       
+    #       #print for debugging
+    #       print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
+    #       
+    #       filename = paste0(ds_dir, '/',var_j,'.rds')
+    #       if(!file.exists(filename)){
+    #         
+    #         tic()
+    #         m = ordbetareg(
+    #           # formula = mvbind(jmd_scaled, logistic_AUC) ~ months_since_harvest + harvested + (1 + months_since_harvest + harvested | block_id)
+    #           mv_form,
+    #           # prior = c(prior(normal(0,1), class = Intercept),
+    #           #           prior(normal(0,1), class = b)
+    #           #           ),
+    #           data = dat_ds_var,
+    #           true_bounds = c(0,1),
+    #           chains = 4, cores = 4, iter = 4000,
+    #           control = list(adapt_delta = 0.99)  # helps with convergence in complex models
+    #         )
+    #         
+    #         saveRDS(m, filename)
+    #         toc()
+    #       }
+    #     }
+    #     ,cl = 'future'
+    #     ,future.seed =T
+    #     )
+    #   })
+    #   
+    # }
+    # 
+    # ####GAUSSIAN REGRESSION
+    # {
+    #   mits_g_string = 'MITS_models_Gaussian_AR(1)'
+    #   mits_g_dir = paste0(bm_dir,'/',mits_g_string)
+    #   dir.check(mits_g_dir)
+    #   
+    #   #fit regression models for each combination of dataset and feature
+    #   pblapply(1:length(datasets), function(i){
+    #     
+    #     ds_i = datasets[i]
+    #     dat_ds = results_df |>
+    #       filter(dataset == ds_i,
+    #              block_pixel_stratum == 'Total') #do this filter else will have redundant points
+    #     
+    #     ds_dir = paste0(mits_g_dir, '/', ds_i)
+    #     dir.check(ds_dir)
+    #     
+    #     pblapply(1:length(ps_feats), function(j){
+    #       
+    #       var_j = ps_feats[j]
+    #       dat_ds_var = dat_ds |> filter(var_name == var_j)
+    #       
+    #       #print for debugging
+    #       print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
+    #       
+    #       filename = paste0(ds_dir, '/',var_j,'.rds')
+    #       if(!file.exists(filename)){
+    #         
+    #         
+    #         m <- brm(
+    #           mv_form
+    #           + set_rescor(TRUE),  # allow residuals to be correlated
+    #           data = dat_ds_var,
+    #           family = gaussian(),  # or consider beta family if you rescale to (0,1)
+    #           chains = 4, cores = 8, iter = 4000,
+    #           control = list(adapt_delta = 0.95)  # helps with convergence in complex models
+    #         )
+    #         
+    #         saveRDS(m, filename)
+    #       }
+    #     }
+    #     ,cl = 'future'
+    #     )
+    #   })
+    #   
+    #   
+    # }
+    # 
+    # # plan('sequential')
+    # 
+    # plan('multisession', workers = 4)
+    # ####ORDERED BETA REGRESSION PIECEWISE GAM
+    # {
+    #   mits_ob_gam_string = 'MITS_GAM_models_OrderedBeta'
+    #   mits_ob_gam_dir = paste0(bm_dir,'/',mits_ob_gam_string)
+    #   dir.check(mits_ob_gam_dir)
+    # 
+    # 
+    #   mv_gam_form = bf(
+    #     mvbind(jmd_scaled, logistic_AUC) ~
+    #       s(months_since_harvest) + harvested + s(months_since_harvest, by = harvested) + (1 | block_id)
+    #   )
+    # 
+    #   #fit beta regression models for each combination of dataset and feature
+    #   pblapply(1:length(datasets), function(i){
+    # 
+    #     ds_i = datasets[i]
+    #     dat_ds = results_df |>
+    #       filter(dataset == ds_i,
+    #              block_pixel_stratum == 'Total') #do this filter else will have redundant points
+    # 
+    #     ds_dir = paste0(mits_ob_gam_dir, '/', ds_i)
+    #     dir.check(ds_dir)
+    # 
+    #     pblapply(1:length(ps_feats), function(j){
+    # 
+    #       var_j = ps_feats[j]
+    #       dat_ds_var = dat_ds |> filter(var_name == var_j)
+    # 
+    #       #print for debugging
+    #       print(paste0('Processing ',mits_ob_gam_string,' ',i,'---',j,': ',ds_i,'---',var_j))
+    # 
+    #       filename = paste0(ds_dir, '/',var_j,'.rds')
+    #       if(!file.exists(filename)){
+    # 
+    # 
+    #         tic()
+    #         m = ordbetareg(
+    #           # formula = mvbind(jmd_scaled, logistic_AUC) ~ months_since_harvest + harvested + (1 + months_since_harvest + harvested | block_id)
+    #           mv_gam_form,
+    #           # prior = c(prior(normal(0,1), class = Intercept),
+    #           #           prior(normal(0,1), class = b)
+    #           #           ),
+    #           data = dat_ds_var,
+    #           true_bounds = c(0,1),
+    #           chains = 4, cores = 4, iter = 4000,
+    #           control = list(adapt_delta = 0.99)  # helps with convergence in complex models
+    #         )
+    # 
+    #         saveRDS(m, filename)
+    #         toc()
+    #       }
+    #     }
+    #     ,cl = 'future'
+    #     ,future.seed = T
+    #     )
+    #   })
+    # }
+    # 
+    # plan('sequential')
     
-    mv_form = bf(
-      mvbind(jmd_scaled, logistic_AUC) ~ 
-        months_since_harvest * harvested + (1 + months_since_harvest + harvested | block_id)
-    )
-    
-    ####GAUSSIAN REGRESSION
-    {
-      # mits_g_string = 'MITS_models_Gaussian_AR(1)'
-      # mits_g_dir = paste0(bm_dir,'/',mits_g_string)
-      # dir.check(mits_g_dir)
-      # 
-      # plan('multisession', workers = 6)
-      # 
-      # #fit regression models for each combination of dataset and feature
-      # pblapply(1:length(datasets), function(i){
-      #   
-      #   ds_i = datasets[i] 
-      #   dat_ds = results_df |> 
-      #     filter(dataset == ds_i,
-      #            block_pixel_stratum == 'Total') #do this filter else will have redundant points
-      #   
-      #   ds_dir = paste0(mits_g_dir, '/', ds_i)
-      #   dir.check(ds_dir)
-      #   
-      #   pblapply(1:length(ps_feats), function(j){
-      #     
-      #     var_j = ps_feats[j]
-      #     dat_ds_var = dat_ds |> filter(var_name == var_j)
-      #     
-      #     #print for debugging
-      #     print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
-      #     
-      #     filename = paste0(ds_dir, '/',var_j,'.rds')
-      #     if(!file.exists(filename)){
-      #       
-      #       # # Model formula for Jeffries-Matusita (scaled between 0 and 2)
-      #       # jm_formula <- bf(
-      #       #   jmd_scaled ~ acquisition_date_ordinal * harvested + (1 | block_id),
-      #       #   autocor = ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
-      #       # )
-      #       # 
-      #       # # Model formula for AUC (scaled between 0 and 1)
-      #       # auc_formula <- bf(
-      #       #   logistic_AUC ~ acquisition_date_ordinal * harvested + (1 | block_id),
-      #       #   autocor = ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
-      #       # )
-      #       
-      #       # #formulate multivariate model
-      #       # mv_form = bf(
-      #       #   mvbind(jmd_scaled, logistic_AUC) ~ months_since_harvest + harvested + (1 + months_since_harvest + harvested | block_id)
-      #       # )
-      #       
-      #       # mv_form = bf(
-      #       #   mvbind(jmd_scaled, logistic_AUC) ~ 
-      #       #     acquisition_date_ordinal * harvested + (1 | block_id) 
-      #       #   # + cor_ar(~ acquisition_date_ordinal | block_id, p = 1)
-      #       #   + ar(time = acquisition_date_ordinal, gr = block_id, p = 1)
-      #       # )
-      #       
-      #       # Fit the multivariate model
-      #       
-      #       m <- brm(
-      #         mv_form 
-      #         + set_rescor(TRUE),  # allow residuals to be correlated
-      #         data = dat_ds_var,
-      #         family = gaussian(),  # or consider beta family if you rescale to (0,1)
-      #         chains = 4, cores = 8, iter = 4000,
-      #         control = list(adapt_delta = 0.95)  # helps with convergence in complex models
-      #       )
-      #       
-      #       # m = ordbetareg(
-      #       #   mv_form
-      #       #   # + set_rescor(TRUE)
-      #       #   ,  # allow residuals to be correlated
-      #       #   data = dat_ds_var,
-      #       #   true_bounds = c(0,1),
-      #       #   chains = 4, cores = 8, iter = 4000,
-      #       #   control = list(adapt_delta = 0.95)  # helps with convergence in complex models
-      #       # )
-      #       
-      #       saveRDS(m, filename)
-      #     }
-      #   }
-      #   ,cl = 'future'
-      #   )
-      # })
-      # 
-      # plan('sequential')
-    }
-    
-    ####ORDERED BETA REGRESSION
-    {
-      mits_ob_string = 'MITS_models_OrderedBeta_AR(1)'
-      mits_ob_dir = paste0(bm_dir,'/',mits_ob_string)
-      dir.check(mits_ob_dir)
-      
-      plan('multisession', workers = 3)
-      
-      #fit beta regression models for each combination of dataset and feature
-      pblapply(1:length(datasets), function(i){
-        
-        ds_i = datasets[i] 
-        dat_ds = results_df |> 
-          filter(dataset == ds_i,
-                 block_pixel_stratum == 'Total') #do this filter else will have redundant points
-        
-        ds_dir = paste0(mits_ob_dir, '/', ds_i)
-        dir.check(ds_dir)
-        
-        pblapply(1:length(ps_feats), function(j){
-          
-          var_j = ps_feats[j]
-          dat_ds_var = dat_ds |> filter(var_name == var_j)
-          
-          #print for debugging
-          print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
-          
-          filename = paste0(ds_dir, '/',var_j,'.rds')
-          if(!file.exists(filename)){
-            
-            tic()
-            m = ordbetareg(
-              # formula = mvbind(jmd_scaled, logistic_AUC) ~ months_since_harvest + harvested + (1 + months_since_harvest + harvested | block_id)
-              mv_form,
-              # prior = c(prior(normal(0,1), class = Intercept),
-              #           prior(normal(0,1), class = b)
-              #           ),
-              data = dat_ds_var,
-              true_bounds = c(0,1),
-              chains = 4, cores = 4, iter = 4000,
-              control = list(adapt_delta = 0.99)  # helps with convergence in complex models
-            )
-            
-            saveRDS(m, filename)
-            toc()
-          }
-        }
-        ,cl = 'future'
-        ,future.seed =T
-        )
-      })
-      
-      plan('sequential')
-    }
-    
-    ####ORDERED BETA REGRESSION PIECEWISE GAM
-    {
-      mits_ob_gam_string = 'MITS_GAM_models_OrderedBeta_AR(1)'
-      mits_ob_gam_dir = paste0(bm_dir,'/',mits_ob_gam_string)
-      dir.check(mits_ob_gam_dir)
-      
-      
-      mv_gam_form = bf(
-        mvbind(jmd_scaled, logistic_AUC) ~ 
-          s(months_since_harvest) + harvested + s(months_since_harvest, by = harvested) + (1 | block_id)
-      )
-      
-      plan('multisession', workers = 6)
-      
-      #fit beta regression models for each combination of dataset and feature
-      pblapply(1:length(datasets), function(i){
-        
-        ds_i = datasets[i] 
-        dat_ds = results_df |> 
-          filter(dataset == ds_i,
-                 block_pixel_stratum == 'Total') #do this filter else will have redundant points
-        
-        ds_dir = paste0(mits_ob_gam_dir, '/', ds_i)
-        dir.check(ds_dir)
-        
-        pblapply(1:length(ps_feats), function(j){
-          
-          var_j = ps_feats[j]
-          dat_ds_var = dat_ds |> filter(var_name == var_j)
-          
-          #print for debugging
-          print(paste0('Processing ',i,'---',j,': ',ds_i,'---',var_j))
-          
-          filename = paste0(ds_dir, '/',var_j,'.rds')
-          if(!file.exists(filename)){
-            
-            
-            tic()
-            m = ordbetareg(
-              # formula = mvbind(jmd_scaled, logistic_AUC) ~ months_since_harvest + harvested + (1 + months_since_harvest + harvested | block_id)
-              mv_gam_form,
-              # prior = c(prior(normal(0,1), class = Intercept),
-              #           prior(normal(0,1), class = b)
-              #           ),
-              data = dat_ds_var,
-              true_bounds = c(0,1),
-              chains = 4, cores = 4, iter = 4000,
-              control = list(adapt_delta = 0.99)  # helps with convergence in complex models
-            )
-            
-            # saveRDS(m, filename)
-            toc()
-          }
-        }
-        ,cl = 'future'
-        ,future.seed = T
-        )
-      })
-      
-      plan('sequential')
-    }
     
   }
-}
 
 #----timeseries analysis using raw pixel values
 {
