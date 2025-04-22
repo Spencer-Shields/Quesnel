@@ -4,12 +4,12 @@
 
 #----define function for plotting lists of rasters----
 
-list_plot = function(l, single_plot = T, col = viridis::viridis(101)){
+list_plot = function(l, single_plot = T, new_window=T, col = viridis::viridis(101)){
   #function for plotting list of named single-band rasters
   #rasters must be named
   #single_plot = T makes plots faceted in a grid, otherwise plots will appear in individual windows.
   if(single_plot == T){
-    x11()
+    if(new_window){x11()}
     par(mfrow = c(ceiling(sqrt(length(l))), ceiling(sqrt(length(l)))))
     
     for(i in 1:
@@ -28,7 +28,7 @@ list_plot = function(l, single_plot = T, col = viridis::viridis(101)){
   } else {
     
     lapply(X = 1:length(l), function(i){
-      x11()
+      if(new_window){x11()}
       plot(l[[i]], main = names(l)[i])
     })
   }
