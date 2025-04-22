@@ -1,29 +1,29 @@
 #----packages----
-  library(tidyverse)
-  library(terra)
-  library(RStoolbox)
-  library(tools)
-  library(sf)
-  library(pbapply)
-  library(parallel)
-  library(future)
-  library(future.apply)
-  library(tidyterra)
-  library(Rcpp)
-  library(tictoc)
-  library(arrow)
-  library(data.table)
-  library(car)
-  library(nortest)
-  library(pROC)
-  library(varSel)
-  library(tseries)
-  library(lme4)
-  library(glmmTMB)
-  #extra functions
-  source('helper_functions.R')
-  #functions for checking or visualizing radiometric consistency
-  source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/check_radiometric_consistency.R')
+library(tidyverse)
+library(terra)
+library(RStoolbox)
+library(tools)
+library(sf)
+library(pbapply)
+library(parallel)
+library(future)
+library(future.apply)
+library(tidyterra)
+library(Rcpp)
+library(tictoc)
+library(arrow)
+library(data.table)
+library(car)
+library(nortest)
+library(pROC)
+library(varSel)
+library(tseries)
+library(lme4)
+library(glmmTMB)
+#extra functions
+source('helper_functions.R')
+#functions for checking or visualizing radiometric consistency
+source('https://raw.githubusercontent.com/Spencer-Shields/planetscope_radiometric_correction/refs/heads/main/check_radiometric_consistency.R')
 
 
 #----load data----
@@ -50,8 +50,6 @@ names(lidar_files) = lidar_ids
 #load non-vegetation mask data
 nonveg_mask_dir = 'data/Quesnel_thinning/nonveg_mask_pre=0.5_post=0.3'
 nonveg_mask_files = list.files(nonveg_mask_dir, full.names = T)
-nonveg_mask_l = pblapply(nonveg_mask_files, function(f)rast(f))
-names(nonveg_mask_l) = basename(file_path_sans_ext(nonveg_mask_files))
 
 #get dataframe of scene metadata
 meta_df = ps_meta(raw_dir) |> distinct()
@@ -134,113 +132,116 @@ pblapply(dirs, function(x){ #make subdirectories to store scenes by block
   })
 })
 
-#process rasters
-plan('multisession', workers = 14)
-
-pblapply(1:length(ids), function(i){
+if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*length(thinning_block_ids)*length(ids)){
+  #process rasters
+  # plan('multisession', workers = 10)
   
-  id = ids[i]
+  pblapply(1:length(ids), function(i){
+    
+    id = ids[i]
+    
+    pblapply(1:length(thinning_block_ids), function(j){
+      
+      block_dir = thinning_block_ids[j]
+      
+      #Non-normalized raster
+      nonnorm_file = paste0(nonnorm_dir,'/',block_dir,'/',id,'.tif')
+      # print(paste('Processing', nonnorm_file))
+      if(!file.exists(nonnorm_file)){
+        
+        #load raster
+        f_r = raw_rasters[str_detect(raw_rasters, id) & !str_detect(raw_rasters, 'udm')][1]
+        r = rast(f_r)
+        
+        #mask using UDM
+        f_udm = raw_rasters[str_detect(raw_rasters, id) & str_detect(raw_rasters, 'udm')][1]
+        udm = rast(f_udm)
+        
+        r = mask(r, udm[['cloud']]) #remove cloud
+        r = mask(r, udm[['shadow']]) #remove shadow
+        r = mask(r, udm[['haze_heavy']]) #remove heavy haze
+        
+        #crop to block
+        block = blocks |> filter(BLOCKNUM == block_dir)
+        r = crop(r, block, mask = T)
+        
+        #use nonveg mask
+        nvf = nonveg_mask_files[which(str_detect(nonveg_mask_files,block_dir))]
+        nvm = rast(nvf)
+        nvm_rs = resample(nvm,r)
+        r = mask(r, nvm_rs)
+        
+        
+        #calculate vegetation indices
+        
+        si = spectralIndices(img = r, blue = 'blue', green = 'green', red = 'red', nir = 'nir', redEdge1 = 'rededge'
+                             ,scaleFactor = scale_factor, skipRefCheck = T)
+        vi = rast.batch.functions(r, include_input = F, fl = c(
+          hue.vi,
+          gcc.vi,
+          ndgr.vi,
+          bi.vi,
+          ci.vi,
+          cri550.vi,
+          gli.vi,
+          # tvi.vi,
+          varig.vi
+        ))
+        
+        r = c(r, si, vi)
+        
+        #save file
+        terra::writeRaster(r, nonnorm_file, datatype='FLT8S')
+        
+      } else {
+        r = rast(nonnorm_file)
+      }
+      
+      #Z-score raster
+      z_file = paste0(z_dir,'/',block_dir,'/',id,'.tif')
+      # print(paste('Processing',z_file))
+      if(!file.exists(z_file)){
+        z_r = rast(lapply(r, z_rast))
+        writeRaster(z_r, z_file)
+      }
+      
+      #robust Z-score raster
+      zr_file = paste0(zr_dir,'/',block_dir,'/',id,'.tif')
+      # print(paste('Processing',zr_file))
+      if(!file.exists(zr_file)){
+        zr_r = rast(lapply(r, function(x)z_rast(x,robust = T)))
+        writeRaster(zr_r, zr_file)
+      }
+      
+      #softmax raster
+      sm_file = paste0(sm_dir,'/',block_dir,'/',id,'.tif')
+      # print(paste('Processing',sm_file))
+      if(!file.exists(sm_file)){
+        
+        #scale bands for use with softmax
+        rs = rast(lapply(1:nlyr(r), function(k){
+          b = r[[k]]
+          nom = names(r)[k]
+          if(nom %in% raw_bands){
+            b = b/scale_factor
+          } else {
+            b 
+          }
+          return(b)
+        }))
+        
+        sm_r = softmax(rs, append_name = F)
+        writeRaster(sm_r, sm_file, datatype='FLT8S')
+      }
+    })
+    
+  }
+  # ,cl = 'future'
+  # ,future.seed=T
+  )
   
-  pblapply(1:length(thinning_block_ids), function(j){
-    
-    block_dir = thinning_block_ids[j]
-    
-    #Non-normalized raster
-    nonnorm_file = paste0(nonnorm_dir,'/',block_dir,'/',id,'.tif')
-    print(paste('Processing', nonnorm_file))
-    if(!file.exists(nonnorm_file)){
-
-      #load raster
-      f_r = raw_rasters[str_detect(raw_rasters, id) & !str_detect(raw_rasters, 'udm')][1]
-      r = rast(f_r)
-      
-      #mask using UDM
-      f_udm = raw_rasters[str_detect(raw_rasters, id) & str_detect(raw_rasters, 'udm')][1]
-      udm = rast(f_udm)
-      
-      r = mask(r, udm[['cloud']]) #remove cloud
-      r = mask(r, udm[['shadow']]) #remove shadow
-      r = mask(r, udm[['haze_heavy']]) #remove heavy haze
-      
-      #crop to block
-      block = blocks |> filter(BLOCKNUM == block_dir)
-      r = crop(r, block, mask = T)
-      
-      #use nonveg mask
-      nvm = nonveg_mask_l[[block_dir]]
-      nvm_rs = resample(nvm,r)
-      r = mask(r, nvm_rs)
-      
-      
-      #calculate vegetation indices
-      
-      si = spectralIndices(img = r, blue = 'blue', green = 'green', red = 'red', nir = 'nir', redEdge1 = 'rededge'
-                           ,scaleFactor = scale_factor, skipRefCheck = T)
-      vi = rast.batch.functions(r, include_input = F, fl = c(
-        hue.vi,
-        gcc.vi,
-        ndgr.vi,
-        bi.vi,
-        ci.vi,
-        cri550.vi,
-        gli.vi,
-        # tvi.vi,
-        varig.vi
-      ))
-      
-      r = c(r, si, vi)
-      
-      #save file
-      terra::writeRaster(r, nonnorm_file, datatype='FLT8S')
-      
-    } else {
-      r = rast(nonnorm_file)
-    }
-    
-    #Z-score raster
-    z_file = paste0(z_dir,'/',block_dir,'/',id,'.tif')
-    print(paste('Processing',z_file))
-    if(!file.exists(z_file)){
-      z_r = rast(lapply(r, z_rast))
-      writeRaster(z_r, z_file)
-    }
-    
-    #robust Z-score raster
-    zr_file = paste0(zr_dir,'/',block_dir,'/',id,'.tif')
-    print(paste('Processing',zr_file))
-    if(!file.exists(zr_file)){
-      zr_r = rast(lapply(r, function(x)z_rast(x,robust = T)))
-      writeRaster(zr_r, zr_file)
-    }
-    
-    #softmax raster
-    sm_file = paste0(sm_dir,'/',block_dir,'/',id,'.tif')
-    print(paste('Processing',sm_file))
-    if(!file.exists(sm_file)){
-      
-      #scale bands for use with softmax
-      rs = rast(lapply(1:nlyr(r), function(k){
-        b = r[[k]]
-        nom = names(r)[k]
-        if(nom %in% raw_bands){
-          b = b/scale_factor
-        } else {
-          b 
-        }
-        return(b)
-      }))
-      
-      sm_r = softmax(rs, append_name = F)
-      writeRaster(sm_r, sm_file, datatype='FLT8S')
-    }
-  })
-  
+  # plan('sequential')
 }
-,cl = 'future'
-)
-
-# plan('sequential')
-
 
 
 #----timeseries analysis by thinned vs not-thinned pixels----
@@ -248,8 +249,8 @@ pblapply(1:length(ids), function(i){
   #----extract stats from remote sensing data----
   harvest_threshold = "Otsu"
   
-  data_string = paste0('Non-normalized_GlobalStats_byblock_ThinnedVsNotVsTotal_HarvestThreshold=',harvest_threshold,'_withTests_EqualClasses')
-  data_filename = paste0(ps_dir,'/',data_string,'.csv')
+  data_string = paste0('Stats_logAUC_JMD_HarvestThreshold=',harvest_threshold,'_EqualClasses')
+  data_filename = paste0(ps_dir,'/',data_string,'.arrow')
   
   #run if summary data file does not exist
   if(!file.exists(data_filename)){
@@ -258,9 +259,9 @@ pblapply(1:length(ids), function(i){
     
     #get list of all files
     dirs = c(
-      # z_dir
-      # ,zr_dir
-      # ,
+      z_dir
+      ,zr_dir
+      ,
       sm_dir
       ,
       nonnorm_dir
@@ -340,163 +341,179 @@ pblapply(1:length(ids), function(i){
     
     plan('multisession', workers = 10)
     
-    # df_l = pblapply(1:10, function(i){
-    df_l = pblapply(1:length(all_files_thinning), function(i){
+    global_tables_dir = paste0(ps_dir,'/',data_string)
+    dir.check(global_tables_dir)
     
+    # df_l = pblapply(1:10, function(i){
+    future_lapply(1:length(all_files_thinning), function(i){
+      
       x = all_files_thinning[i]
       print(paste0('Processing ', x,', ',i,'/',length(all_files_thinning))) #uncomment to identify files where processing fails
       
-      #get raster
-      r = rast(x)
-      
-      #drop extra TVI if it's there
-      if(names(r)[35] == 'TVI'){r = r[[-35]]}
-      
-      #get lidar mask
+      id = basename(file_path_sans_ext(x))
+      dataset = find_substring(x,dataset_strings) |> str_replace('/','')
       block = find_substring(x, lidar_ids)
-      lid_mask_wrapped = lid_masks_equalclasses[[block]]
-      m_ = unwrap(lid_mask_wrapped)
-      m = resample(m_,r)
       
-      #mask planetscope raster using thinning and non-thinning masks
-      r_t = mask(r, m[[1]])
-      r_nt = mask(r, m[[2]])
       
-      #calculate global stats for thinning pixels
-      d1 = global(r_t, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      d1 = cbind(d1, 
-                 global(r_t, median, na.rm=T) |> rename(median = global)
-      )
-      d1[['block_pixel_stratum']] = 'Thinned'
-      d1[['v1']] = rownames(d1)
-      
-      #calculate global stats for non-thinning pixels
-      d2 = global(r_nt, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      d2 = cbind(d2, 
-                 global(r_nt, median, na.rm=T) |> rename(median = global)
-      )
-      d2[['block_pixel_stratum']] = 'Not_thinned'
-      d2[['v1']] = rownames(d2)
-      
-      #total block stats
-      d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
-      d3 = cbind(d3, 
-                 global(r, median, na.rm=T) |> rename(median = global)
-      )
-      d3[['block_pixel_stratum']] = 'Total'
-      d3[['v1']] = rownames(d3)
-      
-      #combine thinning, non-thinning, and global stats
-      d = rbind(d1,d2,d3)
-      
-      #get dataset
-      dataset = find_substring(x,dataset_strings)
-      d[['dataset']] = dataset
-      
-      #get block
-      d[['block_id']] = block
-      
-      #get date
-      date_ = find_substring(x, date_vector)
-      d[['acquisition_date']] = date_
-      
-      #filepath
-      d[['file_path']] = x
-      
-      #delta
-      d[['delta']] = str_detect(x, '_delta')
-      
-      ###statistical measures between groups
-      
-      v_t = values(r_t, dataframe=T) |> mutate(thinning = 'Thinned')
-      v_nt = values(r_nt, dataframe=T) |> mutate(thinning = 'Not_thinned') 
-      v_df = rbind(v_t, v_nt)
-      
-      feats = unique(d$v1)
-      feats = feats[!feats %in% c('max_DN', 'VARIgreen')] #don't run tests on max_DN
-      
-      tests_l = pblapply(feats, function(y){
+      filename = paste0(global_tables_dir,'/',dataset,'_',block,'_',id,'.arrow')
+      if(!file.exists(filename)){
         
-        print(paste('Processing',y))
-        #subset values to test from dataframe
-        v = v_df |> select(all_of(c(y, 'thinning')))
-        v = v[!is.na(v[[y]]),] #remove NA values
-        v$thinning = as.factor(v$thinning)
+        #get raster
+        r = rast(x)
         
-        #initialize tibble to store results
-        test_df = tibble(
-          v1 = y,
-          logistic_p = NA,
-          logistic_aic = NA,
-          logistic_AUC = NA,
-          fisher_discriminant_ratio = NA,
-          cohen_d = NA,
-          jeffries_matusita_dist = NA,
-          bhattacharya_dist = NA
+        #drop extra TVI if it's there
+        if(names(r)[35] == 'TVI'){r = r[[-35]]}
+        
+        #get lidar mask
+        block = find_substring(x, lidar_ids)
+        lid_mask_wrapped = lid_masks_equalclasses[[block]]
+        m_ = unwrap(lid_mask_wrapped)
+        m = resample(m_,r)
+        
+        #mask planetscope raster using thinning and non-thinning masks
+        r_t = mask(r, m[[1]])
+        r_nt = mask(r, m[[2]])
+        
+        #calculate global stats for thinning pixels
+        d1 = global(r_t, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d1 = cbind(d1, 
+                   global(r_t, median, na.rm=T) |> rename(median = global)
         )
+        d1[['block_pixel_stratum']] = 'Thinned'
+        d1[['v1']] = rownames(d1)
         
-        #get proportion not na
-        proportion_na = d1$notNA[d1$v1==y]/d1$isNA[d1$v1==y]
+        #calculate global stats for non-thinning pixels
+        d2 = global(r_nt, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d2 = cbind(d2, 
+                   global(r_nt, median, na.rm=T) |> rename(median = global)
+        )
+        d2[['block_pixel_stratum']] = 'Not_thinned'
+        d2[['v1']] = rownames(d2)
         
-        if(proportion_na > 0.05 & length(unique(v[[y]])) > 10){ #proceed if proportion na pixels is greater than threshold and there are multiple cell values
-          ##perform tests, store results in test_df
+        #total block stats
+        d3 = global(r, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+        d3 = cbind(d3, 
+                   global(r, median, na.rm=T) |> rename(median = global)
+        )
+        d3[['block_pixel_stratum']] = 'Total'
+        d3[['v1']] = rownames(d3)
+        
+        #combine thinning, non-thinning, and global stats
+        d = rbind(d1,d2,d3)
+        
+        #get dataset
+        d[['dataset']] = str_remove(dataset,'/')
+        
+        #get block
+        d[['block_id']] = block
+        
+        #get date
+        date_ = find_substring(x, date_vector)
+        d[['acquisition_date']] = date_
+        
+        #filepath
+        d[['file_path']] = x
+        
+        ###statistical measures between groups
+        
+        v_t = values(r_t, dataframe=T) |> mutate(thinning = 'Thinned')
+        v_nt = values(r_nt, dataframe=T) |> mutate(thinning = 'Not_thinned') 
+        v_df = rbind(v_t, v_nt)
+        
+        feats = unique(d$v1)
+        feats = feats[!feats %in% c('max_DN', 'VARIgreen')] #don't run tests on max_DN
+        
+        tests_l = pblapply(feats, function(y){
           
-          #logistic regression model
-          log_form = paste('thinning ~', y)
-          log_m = glm(log_form, v, family = 'binomial')
-          log_m_summ = summary(log_m)
+          print(paste('Processing',y))
+          #subset values to test from dataframe
+          v = v_df |> select(all_of(c(y, 'thinning')))
+          v = v[!is.na(v[[y]]),] #remove NA values
+          v$thinning = as.factor(v$thinning)
           
-          test_df$logistic_p = ifelse(is.na(log_m$coefficients[[y]]), 
-                                      NA,
-                                      log_m_summ$coefficients[,4][[y]])
-          test_df$logistic_aic = log_m_summ$aic
+          #initialize tibble to store results
+          test_df = tibble(
+            v1 = y,
+            logistic_p = NA,
+            logistic_aic = NA,
+            logistic_AUC = NA,
+            fisher_discriminant_ratio = NA,
+            cohen_d = NA,
+            jeffries_matusita_dist = NA,
+            bhattacharya_dist = NA
+          )
           
-          log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
-          log_roc = roc(thinning ~ predictions, log_p, quiet=T)
-          test_df$logistic_AUC = as.numeric(auc(log_roc))
+          #get proportion not na
+          proportion_na = d1$notNA[d1$v1==y]/d1$isNA[d1$v1==y]
           
-          #Fisher discriminant ratio
-          fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
-          test_df$fisher_discriminant_ratio = fdr
-          
-          #Cohen's d
-          pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
+          if(proportion_na > 0.05 & length(unique(v[[y]])) > 10){ #proceed if proportion na pixels is greater than threshold and there are multiple cell values
+            ##perform tests, store results in test_df
+            
+            #logistic regression model
+            log_form = paste('thinning ~', y)
+            log_m = glm(log_form, v, family = 'binomial')
+            log_m_summ = summary(log_m)
+            
+            test_df$logistic_p = ifelse(is.na(log_m$coefficients[[y]]), 
+                                        NA,
+                                        log_m_summ$coefficients[,4][[y]])
+            test_df$logistic_aic = log_m_summ$aic
+            
+            log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
+            log_roc = roc(thinning ~ predictions, log_p, quiet=T)
+            test_df$logistic_AUC = as.numeric(auc(log_roc))
+            
+            #Fisher discriminant ratio
+            fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
+            test_df$fisher_discriminant_ratio = fdr
+            
+            #Cohen's d
+            pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
                               (d2$notNA[d2$v1 == y] - 1) * d2$sd[d2$v1 == y]^2) /
                              (d1$notNA[d1$v1 == y] + d2$notNA[d2$v1 == y] - 2))
-          cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
-          test_df$cohen_d = cohen_d
+            cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
+            test_df$cohen_d = cohen_d
+            
+            #Jeffries-Matusita distance
+            jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
+            test_df$jeffries_matusita_dist = jmd$jmdist
+            
+            #Bhattacharya distance
+            bhat = BHATdist(g = v$thinning, X = tibble(v[[y]]))
+            test_df$bhattacharya_dist = bhat$bhatdist
+            
+          }
           
-          #Jeffries-Matusita distance
-          jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
-          test_df$jeffries_matusita_dist = jmd$jmdist
-          
-          #Bhattacharya distance
-          bhat = BHATdist(g = v$thinning, X = tibble(v[[y]]))
-          test_df$bhattacharya_dist = bhat$bhatdist
-          
-        }
+          #return results dataframe
+          return(test_df)
+        })
+        test_results = bind_rows(tests_l)
         
-        #return results dataframe
-        return(test_df)
-      })
-      test_results = bind_rows(tests_l)
+        ###attach statistical test results to the summary stats dataframe
+        
+        d = d %>% left_join(test_results, by = 'v1')
+        
+        ####save the final result
+        write_feather(d, filename)
+        # return(d)
+      }
+      }
+      # ,cl = 'future'
+      # ,future.seed=T
+      )
       
-      ###attach statistical test results to the summary stats dataframe
+      # results_df1 = bind_rows(df_l)
+      # results_df = setDT(results_df1)
+      # 
+      # fwrite(results_df, data_filename)
+      all_global_tables = list.files(global_tables_dir, full.names = T, pattern = '\\.tif$')
+      tables_l = pblapply(all_global_tables, function(x)setDT(read_feather(x)))
       
-      d = d %>% left_join(test_results, by = 'v1')
+      results_df = rbindlist(tables_l)
+      write_feather(results_df,data_filename)
       
-      ####return final result
-      return(d)
-    }
-    ,cl = 'future'
-    )
-    
-    results_df = bind_rows(df_l)
-    
-    write_csv(results_df, data_filename)
-    
-    # plan('sequential')
-  }
+      plan('sequential')
+      }
   
   #----clean and process dataframe----
   
@@ -531,18 +548,19 @@ pblapply(1:length(ids), function(i){
   #   mutate(dataset = str_remove(dataset, "^_")) %>%
   #   mutate(dataset = str_remove(dataset, '/$'))
   # 
-  # #add harvest dates
-  # harvest_dates_df = tribble(
-  #   ~block_id, ~harvest_start_date, ~harvest_finish_date,
-  #   '12L_C5', '2022-08-07', '-',
-  #   '12L_D345','2022-07-17', '-',
-  #   '12L_C4', '2022-11', '-',
-  #   '12L_C7', '2022-09-01', '-',
-  #   '12L_B8C3', '2022-09-13', '-',
-  #   '12N_T3', '2023-01-28', '2024-02-29',
-  #   '12N_1X1W', '2024-02-29', '2024-03-22',
-  #   '12N_V1', '2024-03-04', '2024-04-17'
-  # ) |>
+  #add harvest dates
+  harvest_dates_df = tribble(
+    ~block_id, ~harvest_start_date, ~harvest_finish_date,
+    '12L_C5', '2022-07-31', '2022-11-28',
+    '12L_D345','2022-07-06', '2022-07-20',
+    '12L_C4', '2022-10-30', '2023-01-28',
+    '12L_C7', '2022-09-01', '2022-11-28',
+    '12L_B8C3', '2022-09-13', '2022-11-02',
+    '12N_T3', '2023-01-28', '2024-02-29',
+    '12N_1X1W', '2024-02-29', '2024-03-22',
+    '12N_V1', '2024-03-04', '2024-04-17'
+  )
+  # |>
   # results_df = results_df |>
   #   left_join(harvest_dates_df, by = 'block_id') |>
   #   mutate(harvest_date = as.Date(paste0(harvest_month, '-01')))
@@ -849,15 +867,18 @@ pblapply(1:length(ids), function(i){
   # }
   
   
-}
+  }
 
-#----save raw values to dataframes----
+#----get RMSE between adjacent scenes in each block----
+
+#----save raw values to datafiles----
 
 data_tables_dir = paste0(ps_dir,'/Raw_value_data_tables')
 dir.check(data_tables_dir)
 
+library(arrow)
 
-# plan('multisession', workers = 3)
+plan('multisession', workers = 4)
 
 pblapply(dirs, function(x){
   
@@ -879,8 +900,8 @@ pblapply(dirs, function(x){
       
       id = file_path_sans_ext(basename(z))
       
-      filename = paste0(block_dir,'/',id,'.csv')
-      # print(paste('Processing',filename))
+      filename = paste0(block_dir,'/',id,'.parquet')
+      print(paste('Processing',filename))
       if(!file.exists(filename)){
         
         #load raster
@@ -922,11 +943,13 @@ pblapply(dirs, function(x){
         
         
         #write data table
-        fwrite(v, filename)
+        write_parquet(v, filename)
       }
-    })
+    }
+    ,cl='future'
+    )
   })
 }
-,cl='future'
+# ,cl='future'
 )
 plan('sequential')
