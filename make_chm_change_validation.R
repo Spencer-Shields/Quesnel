@@ -1,5 +1,6 @@
 library(tidyverse)
 library(terra)
+library(sf)
 library(tools)
 library(pbapply)
 library(Rcpp)
@@ -26,7 +27,7 @@ chm_pre_files = chm_pre_files[str_detect(chm_pre_files, 'tif$')]
 chm_post_ids = file_path_sans_ext(basename(chm_post_files)) %>% str_extract(".*(?=_chm_)")
 chm_pre_ids = file_path_sans_ext(basename(chm_pre_files)) %>% str_extract(".*(?=_chm_)")
 chm_common_ids = intersect(chm_pre_ids, chm_post_ids)
-  
+
 post_rasts_l = lapply(chm_post_files, rast)
 names(post_rasts_l) = chm_post_ids
 
@@ -110,8 +111,9 @@ otsu_l = pbsapply(names(change_rasts_clipped), function(x){
   d = change_df %>%
     filter(block == x) 
   t = otsuThresholdCpp(values = d[['vals.Z']], bins = 256)
-  })
+})
 
+#plot otsu thresholds on density plots of change rasters
 change_df = change_df %>% 
   left_join(data.frame(block = names(otsu_l), otsu_threshold = otsu_l), by = 'block')
 
@@ -120,6 +122,15 @@ ggplot(data = change_df)+
   geom_vline(aes(xintercept = otsu_threshold, linetype = 'Otsu threshold'))+
   xlab("Height change (m)")+
   facet_grid(vars(block))
+
+#save otsu thresholds
+otsu_tbl = tibble(
+  block_id = names(otsu_l),
+  chm_change_otsu_threshold = otsu_l
+)
+
+otsu_file = paste0(dir,'/','Otsu_change_thresholds.csv')
+if(!file.exists(otsu_file)){write_csv(otsu_tbl,otsu_file)}
 
 #----save change validation rasters which are cropped to the blocks, resampled and reprojected to match basemap data----
 
@@ -150,104 +161,183 @@ pblapply(1:length(change_rasts_clipped), function(i){
   }
 })
 
+#----save change validation rasters for blocks which are resampled to match scenes----
 
-# x11()
-# plot(pre_rasts_common_l[[1]], main = 'pre')
-# x11()
-# plot(post_rasts_common_l[[1]], main = 'post')
-# x11()
-# plot(change_rasts_l[[1]], main = 'pre minus post')
+#get first file from each subdirectory so that there's one planetscope raster for each thinning block
+scene_dir = 'data/planet_scenes/Non-normalized'
+scene_subdirs = list.dirs(scene_dir)
+scene_subdirs = scene_subdirs[scene_subdirs != scene_dir]
+scene_subdirs = scene_subdirs[!str_detect(scene_subdirs, 'NoChange')]
+scene_rasts = lapply(scene_subdirs, function(x){
+  fl = list.files(x, full.names = T)
+  r = rast(fl[1])
+  return(r)
+})
+scene_ids = basename(scene_subdirs)
+names(scene_rasts) = scene_ids
 
-# ch = change_rasts_l[[1]]
-# ch_df = as.data.frame(values(ch))
-# names(ch_df) = 'val'
-# 
-# 
-# h=hist(ch, breaks=30, maxcell = 3000000, plot=F)
-# h_d = data.frame(
-#   # breaks = h$breaks, 
-#                  counts = h$counts, 
-#                  mids = h$mids)
-# 
-# ggplot()+
-#   geom_histogram(data = ch_df, aes(val), binwidth = 2)
-# 
-# ggplot(ch_df, aes(val))+
-#   geom_bar()+
-#   scale_x_binned()
+#make output directory
+chm_change_dir_scene = paste0(chm_change_dir, '_scenes')
+dir.check(chm_change_dir_scene)
 
-# #----Make difference raster masks----
-# 
-# height_change_threshold = 3
-# 
-# harvested_l = pblapply(change_rasts_l, function(x){
-#   msk = ifel(x >= height_change_threshold, 1, NA)
-#   masked = mask(x, msk)
-#   masked
+#resample chm_change rasters to match scenes, save
+pblapply(1:length(change_rasts_clipped), function(i){
+  n = names(change_rasts_clipped)[i]
+  filename = paste0(chm_change_dir_scene,'/',n, '.tif')
+  if(!file.exists(filename)){
+    chm = change_rasts_clipped[[n]]
+    ps = scene_rasts[[n]]
+    chm_p = project(chm, ps)
+    writeRaster(chm_p, filename)
+  }
+})
+
+#----make road and non-vegetated ground mask----
+
+blocks_scene_p = st_transform(blocks_p, crs(scene_rasts[[1]])) #reproject blocks to match scene crs
+blocks_bm_p = st_transform(blocks_p, crs(bm_rasts[[1]]))
+
+pre_threshold = 0.5
+post_threshold = 0.3
+change_threshold = 0.1
+
+#combine scene rasters
+combined_lid_rasts_l = pblapply(blocks_, function(x){
+  
+  block = blocks_scene_p[blocks_p$BLOCKNUM==x,]
+  # scene = scene_rasts[[x]]
+  
+  # print(paste('Processing', block$BLOCKNUM,'combining and cropping lidar rasters'))
+  pre = pre_rasts_l[[x]]
+  post = post_rasts_l[[x]]
+  change = change_rasts_l[[x]]
+  
+  pl = list(pre,post,change)
+  names(pl) = c('pre','post','change')
+  
+  #align rasters and project to match blocks
+  r_l = lapply(names(pl), function(y){
+    r = project(pl[[y]], crs(block))
+    # print(paste('Projected',y))
+    r = crop(r,block,mask=T)
+    # print(paste('Cropped',y))
+    return(r)
+  })
+  names(r_l) = names(pl)
+  
+  r_l[['post']] = resample(r_l[['post']], r_l[['change']])
+  # print(paste('Resample post'))
+  r_l[['pre']] = resample(r_l[['pre']], r_l[['change']])
+  # print(paste('Resample pre'))
+  
+  c_r = rast(r_l)
+  # print(paste('Created combined raster'))
+  
+  names(c_r) = c('pre', 'post', 'change')
+  return(c_r)
+})
+names(combined_lid_rasts_l) = blocks_
+
+combined_lid_dir = paste0(dir,'/chm_combined_cropped') #save
+dir.check(combined_lid_dir)
+pblapply(names(combined_lid_rasts_l), function(n){
+  filename=paste0(combined_lid_dir,'/',n,'.tif')
+  if(!file.exists(filename)){
+    writeRaster(combined_lid_rasts_l[[n]],filename)
+  }
+})
+
+#make masks for scenes
+nonveg_masks_l = pblapply(combined_lid_rasts_l, function(r){
+  m = ifel(r[['pre']] < pre_threshold & r[['post']] < post_threshold
+           ,NA
+           ,1)
+  return(m)
+})
+names(nonveg_masks_l) = blocks_
+# list_plot(scene_nonveg_masks_l)
+
+nonveg_mask_dir = paste0(dir,'/nonveg_mask_pre=',pre_threshold,'_post=',post_threshold) #save masks
+dir.check(nonveg_mask_dir)
+pblapply(names(nonveg_masks_l), function(n){
+  filename=paste0(nonveg_mask_dir,'/',n,'.tif')
+  if(!file.exists(filename)){
+    writeRaster(nonveg_masks_l[[n]],filename)
+  }
+})
+
+#resample to match scene resolution
+resample_mask = pblapply(blocks_, function(x){
+  scene = scene_rasts[[x]]
+  m = scene_nonveg_masks_l[[x]]
+  
+  mrs = resample(m, scene)
+  return(mrs)
+})
+
+# scene_nonveg_mask_dir = paste0(dir,'/nonveg_mask_scene_pre=',pre_threshold,'_post=',post_threshold)
+# dir.check(scene_lid_dir)
+# pblapply(names(scene_combined_rasts_l), function(n){
+#   filename=paste0(scene_lid_dir,'/',n,'.tif')
+#   if(!file.exists(filename)){
+#     writeRaster(scene_combined_rasts_l[[n]],filename)
+#   }
 # })
-# names(harvested_l) = chm_common_ids
-# 
-# list_plot(harvested_l)
-# list_plot(pre_rasts_common_l)
-# list_plot(post_rasts_common_l)
-# # list_plot(harvested_l, single_plot = F)
 
-# #----segmentation----
+# #check results
+# scene_masked_rasts_l = pblapply(1:length(scene_nonveg_masks_l), function(i){
+#   nvm = scene_nonveg_masks_l[[i]]
+#   r = scene_combined_rasts_l[[i]]
+#   r_m = mask(r, nvm)
+#   return(r_m)
+# })
+# names(scene_masked_rasts_l) = blocks_
+# pre_l = lapply(scene_masked_rasts_l, function(x)x[[1]])
+# names(pre_l) = names(scene_masked_rasts_l)
+# list_plot(pre_l)
+# # list_plot(masked_rasts_l, single_plot = T)
 # 
-# a = change_rasts_l[[1]]
-# a
-# density(a)
+# #combine basemap rasters
+# bm_combined_rasts_l = pblapply(blocks_, function(x){
+#   
+#   block = blocks_bm_p[blocks_p$BLOCKNUM==x,]
+#   print(paste('Processing', block$BLOCKNUM,'combining and cropping lidar rasters'))
+#   pre = pre_rasts_l[[x]]
+#   post = post_rasts_l[[x]]
+#   change = change_rasts_l[[x]]
+#   
+#   pl = list(pre,post,change)
+#   names(pl) = c('pre','post','change')
+#   
+#   #align rasters and project to match blocks
+#   r_l = pblapply(names(pl), function(y){
+#     r = project(pl[[y]], crs(block))
+#     print(paste('Projected',y))
+#     r = crop(r,block,mask=T)
+#     print(paste('Cropped',y))
+#     return(r)
+#   })
+#   names(r_l) = names(pl)
+#   
+#   r_l[['post']] = resample(r_l[['post']], r_l[['change']])
+#   print(paste('Resample post'))
+#   r_l[['pre']] = resample(r_l[['pre']], r_l[['change']])
+#   print(paste('Resample pre'))
+#   
+#   c_r = rast(r_l)
+#   print(paste('Created combined raster'))
+#   
+#   names(c_r) = c('pre', 'post', 'change')
+#   return(c_r)
+# })
+# names(bm_combined_rasts_l) = blocks_
 # 
-# library(future)
-# plan(multisession, workers = 8)
-# # slic_a = supercells(a
-# #                     # , k = round(ncell(a)/32)
-# #                     ,1000000
-# #                     , compactness = 1
-# #                     # ,chunks = 150
-# #                     , future = T
-# #                     , verbose = 1)
-# # 
-# # ggplot()+
-# #   geom_sf(data = slic_a, aes(fill = Z), color = NA)+
-# #   scale_fill_viridis_b()
-# plan(sequential)
-# 
-# 
-# 
-# #kmeans
-# min_clusts = 2
-# max_clusts = 50
-# 
-# # k = terra::k_means(a, 2)
-# a_df = as.data.frame(na.omit(values(a)))
-# 
-# # k_2 = kmeans(ps_di_df, centers = 2, iter.max = 20)
-# # k_2
-# # 
-# plan(multisession, workers = 8)
-# km_l = pblapply(min_clusts:max_clusts, function(i){
-#   kmeans(a_df, i)
-# }
-# ,cl = 'future')
-# plan(sequential)
-# 
-# k_results = data.frame(
-#   wcss = sapply(km_l, function(k)k[['tot.withinss']]),
-#   n_clusts = min_clusts:max_clusts)
-# 
-# ggplot(k_results, aes(x = n_clusts, y = wcss))+
-#   geom_point()
-# 
-# k = terra::k_means(a,20)
-# plot(k)
-# # ps_di_v = as.numeric(na.omit(values(ps_di)))
-# # j = getJenksBreaks(ps_di_v, k = 1)
-# # #classify image based on jenks threshold
-# # ps_di_c = ifel(ps_di >= j, 1, 0)
-# # 
-# # ggplot() +
-# #   # geom_histogram(data = di_v, aes(x = DI), bins = 100) +
-# #   geom_density(data = di_v, aes(DI))+
-# #   geom_vline(aes(xintercept = j), linetype = "dashed", color = "red") +
-# #   annotate("text", x = j, y = Inf, label = "Threshold", vjust = 1.5, color = "red")
+# #make masks for basemaps
+# bm_nonveg_masks_l = pblapply(bm_combined_rasts_l, function(r){
+#   m = ifel(r[['pre']] < pre_threshold & r[['post']] < post_threshold
+#            ,NA
+#            ,1)
+#   return(m)
+# })
+# names(bm_nonveg_masks_l) = blocks_
+# list_plot(bm_nonveg_masks_l)
