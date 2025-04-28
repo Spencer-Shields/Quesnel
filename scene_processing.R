@@ -13,13 +13,14 @@ library(Rcpp)
 library(tictoc)
 library(arrow)
 library(data.table)
-library(car)
-library(nortest)
+# library(car)
+# library(nortest)
 library(pROC)
 library(varSel)
 library(tseries)
 library(lme4)
-library(glmmTMB)
+library(patchwork)
+# library(glmmTMB)
 #extra functions
 source('helper_functions.R')
 #functions for checking or visualizing radiometric consistency
@@ -105,7 +106,11 @@ if(crs(blocks) != crs(rast(raw_rasters[1]))){ #reproject blocks if necessary to 
 }
 
 scale_factor = 65535 #scale factor (max value of 16-bit pixel)
+
 raw_bands = names(rast(raw_rasters[!str_detect(raw_rasters,'udm')][1])) #get names of bands in scene rasters (not indices)
+indices_to_use = c('BI', 'MSAVI','SR','Hue','NDVI') #indices to test, determined by corr matrix analysis and PCA (below)
+feats_to_use = c(raw_bands, indices_to_use)
+
 
 nonnorm_string = 'Non-normalized'
 nonnorm_dir = paste0(ps_dir,'/', nonnorm_string)
@@ -124,6 +129,10 @@ sm_dir = paste0(ps_dir,'/',sm_string)
 dir.check(sm_dir)
 
 dirs = c(z_dir, zr_dir, sm_dir, nonnorm_dir)
+
+# dir_strings = c('Z', 'Zrobust', 'SM', 'Non-normalized')
+# dirs = paste0(ps_dir,'/',dir_strings)
+# lapply(dirs,dir.check)
 
 pblapply(dirs, function(x){ #make subdirectories to store scenes by block
   pblapply(thinning_block_ids, function(y){
@@ -339,13 +348,14 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
     
     #----mask PS rasters, save global values in dataframe, calculate stats----
     
-    plan('multisession', workers = 10)
-    
+    # cl = makeCluster(4)
+    # plan('cluster', workers = cl)
+    # 
     global_tables_dir = paste0(ps_dir,'/',data_string)
     dir.check(global_tables_dir)
     
     # df_l = pblapply(1:10, function(i){
-    future_lapply(1:length(all_files_thinning), function(i){
+    pblapply(1:length(all_files_thinning), function(i){
       
       x = all_files_thinning[i]
       print(paste0('Processing ', x,', ',i,'/',length(all_files_thinning))) #uncomment to identify files where processing fails
@@ -449,38 +459,78 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
           if(proportion_na > 0.05 & length(unique(v[[y]])) > 10){ #proceed if proportion na pixels is greater than threshold and there are multiple cell values
             ##perform tests, store results in test_df
             
-            #logistic regression model
-            log_form = paste('thinning ~', y)
-            log_m = glm(log_form, v, family = 'binomial')
-            log_m_summ = summary(log_m)
+            #initialize tibble to store results
+            test_df = tibble(
+              v1 = y,
+              logistic_p = NA,
+              logistic_aic = NA,
+              logistic_AUC = NA,
+              fisher_discriminant_ratio = NA,
+              cohen_d = NA,
+              jeffries_matusita_dist = NA,
+              bhattacharya_dist = NA
+            )
             
-            test_df$logistic_p = ifelse(is.na(log_m$coefficients[[y]]), 
-                                        NA,
-                                        log_m_summ$coefficients[,4][[y]])
-            test_df$logistic_aic = log_m_summ$aic
+            #get proportion not na
+            proportion_na = d1$notNA[d1$v1==y]/d1$isNA[d1$v1==y]
             
-            log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
-            log_roc = roc(thinning ~ predictions, log_p, quiet=T)
-            test_df$logistic_AUC = as.numeric(auc(log_roc))
+            if(proportion_na > 0.05 & length(unique(v[[y]])) > 10){ #proceed if proportion na pixels is greater than threshold and there are multiple cell values
+              ##perform tests, store results in test_df
+              
+              #logistic regression model with tryCatch
+              log_form = paste('thinning ~', y)
+              
+              tryCatch({
+                log_m = glm(log_form, v, family = 'binomial')
+                log_m_summ = summary(log_m)
+                
+                test_df$logistic_p = ifelse(is.na(log_m$coefficients[[y]]), 
+                                            NA,
+                                            log_m_summ$coefficients[,4][[y]])
+                test_df$logistic_aic = log_m_summ$aic
+                
+                log_p = v |> mutate(predictions = predict(log_m, v, type = 'response'))
+                log_roc = roc(thinning ~ predictions, log_p, quiet=T)
+                test_df$logistic_AUC = as.numeric(auc(log_roc))
+              }, 
+              error = function(e) {
+                message("GLM error encountered: ", e$message)
+                # All logistic regression values will remain NA as initialized
+              })
+              
+              #Fisher discriminant ratio
+              fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
+              test_df$fisher_discriminant_ratio = fdr
+              
+              #Cohen's d
+              pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
+                                  (d2$notNA[d2$v1 == y] - 1) * d2$sd[d2$v1 == y]^2) /
+                                 (d1$notNA[d1$v1 == y] + d2$notNA[d2$v1 == y] - 2))
+              cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
+              test_df$cohen_d = cohen_d
+              
+              #Jeffries-Matusita distance
+              tryCatch({
+                jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
+                test_df$jeffries_matusita_dist = jmd$jmdist
+              },
+              error = function(e) {
+                message("Jeffries-Matusita distance error: ", e$message)
+                # jeffries_matusita_dist will remain NA as initialized
+              })
+              
+              #Bhattacharya distance
+              tryCatch({
+                bhat = BHATdist(g = v$thinning, X = tibble(v[[y]]))
+                test_df$bhattacharya_dist = bhat$bhatdist
+              },
+              error = function(e) {
+                message("Bhattacharya distance error: ", e$message)
+                # bhattacharya_dist will remain NA as initialized
+              })
+              
+            }
             
-            #Fisher discriminant ratio
-            fdr = ((d1$mean[d1$v1==y]-d2$mean[d2$v1==y])^2)/(d1$sd[d1$v1==y]^2 + d2$sd[d2$v1==y]^2)
-            test_df$fisher_discriminant_ratio = fdr
-            
-            #Cohen's d
-            pooled_sd = sqrt(((d1$notNA[d1$v1 == y] - 1) * d1$sd[d1$v1 == y]^2 +
-                              (d2$notNA[d2$v1 == y] - 1) * d2$sd[d2$v1 == y]^2) /
-                             (d1$notNA[d1$v1 == y] + d2$notNA[d2$v1 == y] - 2))
-            cohen_d = (d1$mean[d1$v1==y] - d2$mean[d2$v1==y])/pooled_sd
-            test_df$cohen_d = cohen_d
-            
-            #Jeffries-Matusita distance
-            jmd = JMdist(g = v$thinning, X = tibble(v[[y]]))
-            test_df$jeffries_matusita_dist = jmd$jmdist
-            
-            #Bhattacharya distance
-            bhat = BHATdist(g = v$thinning, X = tibble(v[[y]]))
-            test_df$bhattacharya_dist = bhat$bhatdist
             
           }
           
@@ -497,58 +547,68 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
         write_feather(d, filename)
         # return(d)
       }
+    }
+    # ,cl = 'future'
+    # ,future.seed=T
+    )
+    
+    # results_df1 = bind_rows(df_l)
+    # results_df = setDT(results_df1)
+    # 
+    # fwrite(results_df, data_filename)
+    global_tables_files = list.files(global_tables_dir, full.names = T, pattern = '\\.arrow$')
+    # tables_l = pblapply(all_global_tables, function(x)setDT(read_feather(x)))
+    
+    #load tables into a list, save indices of tables that do not load properly
+    global_tables_l = list()
+    bad_indices = c()
+    
+    for (i in seq_along(global_tables_files)) {
+      x = global_tables_files[i]
+      # print(paste('Reading', x,', ',i,'out of',length(global_tables_files)))
+      result <- tryCatch({
+        df <- read_feather(x) |> setDT()
+        global_tables_l[[length(global_tables_l) + 1]] <- df  # Add to list
+        NULL  # No error
+      }, error = function(e) {
+        message(sprintf("Failed at index %d: %s", i, e$message))
+        i  # Return the index that failed
+      })
+      if (!is.null(result)) {
+        bad_indices <- c(bad_indices, result)
       }
-      # ,cl = 'future'
-      # ,future.seed=T
-      )
-      
-      # results_df1 = bind_rows(df_l)
-      # results_df = setDT(results_df1)
-      # 
-      # fwrite(results_df, data_filename)
-      all_global_tables = list.files(global_tables_dir, full.names = T, pattern = '\\.tif$')
-      tables_l = pblapply(all_global_tables, function(x)setDT(read_feather(x)))
-      
-      results_df = rbindlist(tables_l)
-      write_feather(results_df,data_filename)
-      
-      plan('sequential')
+      if(i %% 1000 == 0){ #keep track of progress
+        cat('\rFinished',i,'of',length(global_tables_files))
       }
+    }
+    cat('Bad indices:',bad_indices)
+    
+    # #delete bad files, manually go back and recreate
+    # lapply(bad_indices, function(i){file.remove(global_tables_files[i])})
+    
+    results_df1 = rbindlist(global_tables_l)
+    results_df = results_df1 |>
+      #get scene ID
+      mutate(id = basename(file_path)) |>
+      #fix acquisition_date
+      mutate(acquisition_date = as.Date(paste0(
+        substr(id,1,4),'-', #year
+        substr(id,5,6),'-', #month
+        substr(id,7,8) #day
+      ))) |>
+      rename(var_name = v1)
+    
+    write_feather(results_df,data_filename)
+    
+    # plan('sequential')
+    # stopCluster(cl)
+  }
   
   #----clean and process dataframe----
   
-  # results_df = fread(data_filename)
-  # 
-  # results_df[, acquisition_date2 := as.Date(paste0( #get acquisition date
-  #   substr(basename(file_path_sans_ext(file_path)), 1, 4), "-",  # year
-  #   substr(basename(file_path_sans_ext(file_path)), 5, 6), "-",  # month
-  #   substr(basename(file_path_sans_ext(file_path)), 7, 8)        # day
-  # ))]
-  # results_df[, julian_day := yday(acquisition_date2)]
-  # results_df[, acquisition_year := year(acquisition_date2)]
-  # results_df[, acquisition_month := month(acquisition_date2)]
-  # results_df[, dataset := str_remove(dataset,'/')]
-  # results_df[, var_name := v1]
-  # 
-  # 
-  # 
-  #   #reformat dates
-  #   mutate(
-  #   ) %>%
-  #   mutate(julian_day = yday(acquisition_date2)
-  #   ) %>%
-  #   #modify variable names
-  #   mutate(var_name = str_remove(v1, '_.*')) %>%
-  #   # mutate(var_name = str_remove(var_name, "\\.\\.\\..*")) %>%
-  #   filter(var_name != 'max_DN') %>%
-  #   # fix dataset names
-  #   mutate(block_type = ifelse(str_detect(block_id, 'NoChange'), 'Control', 'Thinning')) %>%
-  #   mutate(dataset = str_replace(dataset, 'BlockClipped','')) %>%
-  #   mutate(dataset = ifelse(str_detect(dataset, 'Z|SM'), dataset, paste0('Non-normalized', dataset))) %>%
-  #   mutate(dataset = str_remove(dataset, "^_")) %>%
-  #   mutate(dataset = str_remove(dataset, '/$'))
-  # 
-  #add harvest dates
+  results_df = read_feather(data_filename)
+  
+  #define harvest dates
   harvest_dates_df = tribble(
     ~block_id, ~harvest_start_date, ~harvest_finish_date,
     '12L_C5', '2022-07-31', '2022-11-28',
@@ -559,27 +619,573 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
     '12N_T3', '2023-01-28', '2024-02-29',
     '12N_1X1W', '2024-02-29', '2024-03-22',
     '12N_V1', '2024-03-04', '2024-04-17'
+  ) |> 
+    mutate(harvest_start_date = as.Date(harvest_start_date),
+           harvest_finish_date = as.Date(harvest_finish_date))
+  
+  results_df = results_df |>
+    #add harvest dates
+    left_join(harvest_dates_df, by = 'block_id') |>
+    #define variable for time before and after harvest_start_date
+    mutate(time_since_harvest_start = as.numeric(acquisition_date - harvest_start_date)) |>
+    #make harvested dummy variable
+    mutate(harvested = ifelse(acquisition_date < harvest_start_date,0,1)) |>
+    left_join(tibble(acquisition_date = sort(unique(results_df$acquisition_date)),
+                     acquisition_date_ordinal = as.numeric(
+                       1:length(unique(results_df$acquisition_date))))) |>
+    #add acquisition month
+    mutate(month = month(acquisition_date)) |>
+    #fix the id column since it currently has file paths
+    mutate(id = file_path_sans_ext(id))|>
+    # #rescale JM distance to give it the range [0-1] so that beta regression can be applied to both AUC and JMD
+    mutate(jmd_scaled = jeffries_matusita_dist/sqrt(2))
+  
+  #make dataframe that only has the results from the tests (i.e. remove unnecessary rows)
+  test_results_df = results_df |> 
+    filter(block_pixel_stratum == 'Total') |> dplyr:: select(-block_pixel_stratum)
+  
+  #----join metadata table with results to find high quality images----
+  
+  meta_df = setDT(meta_df) |> mutate(acquisition_date = as.Date(acquisition_date))
+  
+  results_meta_df = results_df |> left_join(meta_df, by=c('id','acquisition_date'))
+  
+  max_valid_pixels_byfeat_byblock_bypixstrat = results_meta_df |>
+    group_by(block_id,var_name,block_pixel_stratum)|>
+    summarise(max_valid_pixels = max(notNA))
+  results_meta_df = results_meta_df |> left_join(max_valid_pixels_byfeat_byblock_bypixstrat)
+  
+  notNA_threshold = 0.8
+  
+  hq_scenes_df = results_meta_df |>
+    # left_join(max_valid_pixels_byfeat_byblock_bypixstrat) |>
+    mutate(notNA_proportion = notNA/(notNA+isNA))|>
+    filter(var_name %in% feats_to_use,
+           block_pixel_stratum=='Total',
+           notNA >= notNA_threshold*max_valid_pixels) |>
+    pivot_wider(id_cols = c('id','dataset','block_id','acquisition_date'), names_from = var_name, values_from = notNA_proportion) |>
+    na.omit()
+  
+  # ggplot(hq_scenes_df, aes(x = acquisition_date, y=0))+
+  #   geom_point()+
+  #   facet_wrap(vars(dataset))
+  
+  hq_scenes_summ = hq_scenes_df |>
+    mutate(year_mon = format(acquisition_date, "%Y-%m")) |>
+    group_by(dataset, block_id, year_mon) |>
+    summarise(count = n())
+  # ggplot(hq_scenes_summ |> filter(block_id=='12N_T3'), aes(x = year_mon, y = count))+
+  #   geom_point()+
+  #   # geom_line()+
+  #   facet_grid(rows = vars(dataset), cols = vars(block_id))
+  
+  #----focus on analyzing 12N_T3----
+  {
+    
+    #----preprocess block dataframe----
+    id_df_12N_T3 = hq_scenes_df |> filter(block_id == '12N_T3')
+    
+    results_12N_T3 = results_meta_df |>
+      # filter(notNA >= 0.8*max_valid_pixels) |>
+      filter(block_id == '12N_T3'
+             ,id %in% id_df_12N_T3$id,
+             var_name %in% feats_to_use
+             # ,month %in% c(6,7,8,9)
+             # ,dataset!='SM'
+             ,block_pixel_stratum!='Total'
+             # ,acquisition_year!=2021
+      ) |>
+      filter(!acquisition_date %in% c(
+        '2024-04-01'
+        ,'2022-11-17'
+        ,'2022-11-19'
+        ,'2021-12-06'
+      ))|>
+      filter(!id %in% c(
+        '20240401_182741_00_24b2'
+      ))
+    
+    #get full list of files to test
+    all_files_12nt3 = unique(results_12N_T3$file_path)
+    
+    #for plotting
+    results_nt3_plotting = results_12N_T3 |>
+      mutate(var_name = str_replace(var_name, 'coastal_blue', 'cost.blu'))|>
+      mutate(var_name = factor(var_name, levels = c('cost.blu', 'blue', 'green_i', 'green',
+                                                    'yellow', 'red', 'rededge', 'nir', 'BI', 'Hue',
+                                                    'MSAVI', 'NDVI', 'SR')))|>
+      mutate(block_pixel_stratum = str_replace(block_pixel_stratum,'_',' '))|>
+      mutate(block_pixel_stratum = factor(block_pixel_stratum, levels = c('Thinned', 'Not thinned')))
+    
+    
+    #pixels plot
+    {
+      z_pix = ggplot(data = results_nt3_plotting |> filter(dataset=='Z'),
+                     aes(x = acquisition_date,y=mean))+
+        # geom_bin_2d(aes(x = acquisition_date, y = ean, fill = block_pixel_stratum),alpha=0.5)+
+        geom_point(aes(color = block_pixel_stratum),alpha=0.2)+
+        geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+        geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+        # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+        facet_grid(rows = vars(var_name), scales = 'free')+
+        ggtitle('Z-score')+
+        xlab('Acquisition date')+
+        theme_classic()+
+        ylab('Mean pixel value')+
+        theme(strip.text = element_blank(),
+              legend.title = element_blank(),
+              axis.title.y = element_blank())
+      zr_pix = ggplot(data = results_nt3_plotting |>
+                        filter(dataset=='Zrobust'),
+                      aes(x = acquisition_date,y=mean))+
+        # geom_bin_2d(aes(x = acquisition_date, y = mean, fill = block_pixel_stratum),alpha=0.5)+
+        geom_point(aes(color = block_pixel_stratum),alpha=0.2)+
+        geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+        geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+        # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+        facet_grid(rows = vars(var_name), scales = 'free')+
+        ggtitle('Robust Z-score')+
+        ylab(NULL)+
+        theme_classic()+
+        theme(legend.title = element_blank(),
+              axis.title.x = element_blank())
+      nn_pix = ggplot(data = results_nt3_plotting |> filter(dataset=='Non-normalized'),
+                      aes(x = acquisition_date,y=mean))+
+        # geom_bin_2d(aes(x = acquisition_date, y = mean, fill = block_pixel_stratum),alpha=0.5)+
+        geom_point(aes(color = block_pixel_stratum),alpha=0.2)+
+        geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+        geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+        # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+        facet_grid(rows = vars(var_name), scales = 'free')+
+        ggtitle('Non-normalized')+
+        ylab('Mean pixel value')+
+        xlab(NULL)+
+        theme_classic()+
+        theme(strip.text = element_blank(),
+              legend.title = element_blank())
+      # sm_pix = ggplot(data = results_12N_T3 |> filter(dataset=='SM'),
+      #                 aes(x = acquisition_date,y=median))+
+      #   # geom_bin_2d(aes(x = acquisition_date, y = mean, fill = block_pixel_stratum),alpha=0.5)+
+      #   geom_point(aes(color = block_pixel_stratum),alpha=0.5)+
+      #   #geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+      #   geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+      #   geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+      #   facet_grid(rows = vars(var_name), scales = 'free')+
+      #   ggtitle('Softmax')+
+      #   theme_classic()
+      library(patchwork)
+      nn_pix+z_pix+zr_pix+plot_layout(guides = 'collect',ncol=3)
+      }
+    
+    #just BI plot
+    {
+      bi_df = results_nt3_plotting |> filter(var_name=='BI')
+      
+      z_pix = ggplot(data = bi_df |> filter(dataset=='Z'),
+                     aes(x = acquisition_date,y=mean))+
+        # geom_bin_2d(aes(x = acquisition_date, y = ean, fill = block_pixel_stratum),alpha=0.5)+
+        geom_point(aes(color = block_pixel_stratum),alpha=0.2)+
+        geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+        geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+        # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+        facet_grid(rows = vars(var_name), scales = 'free')+
+        ggtitle('Z-score')+
+        xlab('Acquisition date')+
+        theme_classic()+
+        ylab('Mean pixel value')+
+        theme(strip.text = element_blank(),
+              legend.title = element_blank(),
+              axis.title.y = element_blank())
+      zr_pix = ggplot(data = bi_df |>
+                        filter(dataset=='Zrobust'),
+                      aes(x = acquisition_date,y=mean))+
+        # geom_bin_2d(aes(x = acquisition_date, y = mean, fill = block_pixel_stratum),alpha=0.5)+
+        geom_point(aes(color = block_pixel_stratum),alpha=0.2)+
+        geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+        geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+        # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+        facet_grid(rows = vars(var_name), scales = 'free')+
+        ggtitle('Robust Z-score')+
+        ylab(NULL)+
+        theme_classic()+
+        theme(legend.title = element_blank(),
+              axis.title.x = element_blank())
+      nn_pix = ggplot(data = bi_df |> filter(dataset=='Non-normalized'),
+                      aes(x = acquisition_date,y=mean))+
+        # geom_bin_2d(aes(x = acquisition_date, y = mean, fill = block_pixel_stratum),alpha=0.5)+
+        geom_point(aes(color = block_pixel_stratum),alpha=0.2)+
+        geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+        geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+        # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+        facet_grid(rows = vars(var_name), scales = 'free')+
+        ggtitle('Non-normalized')+
+        ylab('Mean pixel value')+
+        xlab(NULL)+
+        theme_classic()+
+        theme(strip.text = element_blank(),
+              legend.title = element_blank())
+      # sm_pix = ggplot(data = results_12N_T3 |> filter(dataset=='SM'),
+      #                 aes(x = acquisition_date,y=median))+
+      #   # geom_bin_2d(aes(x = acquisition_date, y = mean, fill = block_pixel_stratum),alpha=0.5)+
+      #   geom_point(aes(color = block_pixel_stratum),alpha=0.5)+
+      #   #geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
+      #   geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+      #   geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+      #   facet_grid(rows = vars(var_name), scales = 'free')+
+      #   ggtitle('Softmax')+
+      #   theme_classic()
+      library(patchwork)
+      nn_pix+z_pix+zr_pix+plot_layout(guides = 'collect',ncol=3)
+    }
+    
+    
+    #----do random forest for each date for 12N_T3----
+    
+    library(ranger)
+    
+    #set up directories
+    rf_dir = paste0(ps_dir,'/random_forest_models_nopredict')
+    dir.check(rf_dir)
+    
+    #load chm_change file
+    chm = lidar_files[str_detect(lidar_files, '12N_T3')] |> rast()
+    ht = otsu_df$chm_change_otsu_threshold[otsu_df$block_id=='12N_T3']
+    thinning_binary = ifel(chm <= ht,1,0)
+    names(thinning_binary) = 'thinned'
+    
+    pblapply(1:length(all_files_12nt3), function(i){
+      f = all_files_12nt3[i]
+      data_dir = str_replace(dirname(dirname(f)),ps_dir,rf_dir)
+      dir.check(data_dir)
+      block_dir = str_replace(dirname(f), ps_dir,rf_dir)
+      dir.check(block_dir)
+      
+      id = basename(file_path_sans_ext(f))
+      rf_filename = paste0(block_dir,'/',id,'.rds')
+      cat('\rProcessing ',rf_filename,' ',i,'/',length(all_files_12nt3))
+      if(!file.exists(rf_filename)){
+        
+        r = rast(f)
+        r = r[[feats_to_use]]
+        t_r = resample(thinning_binary,r)
+        r_ = c(t_r,r)
+        v = values(r_,dataframe=T) |> 
+          na.omit() |> 
+          mutate(thinned = ifelse(thinned == 1, 'Thinned','Not_thinned'))
+        v$thinned = as.factor(v$thinned)
+        
+        #balance classes
+        min_class_size <- v %>%
+          count(thinned) %>%
+          pull(n) %>%
+          min()
+        v_b <- v %>%
+          group_by(thinned) %>%
+          slice_sample(n = min_class_size) %>%
+          ungroup()
+        
+        #fit random forest model, message if error thrown
+        rf <- tryCatch({
+          ranger(thinned ~ ., data = v_b
+                 , importance = 'impurity'
+                 ,write.forest = F
+                 ,verbose = F
+                 # ,num.trees = 300
+          )
+        }, error = function(e) {
+          message('\nError fitting RF for file: ', f)
+          message('Error: ', e$message)
+          return(NULL)
+        })
+        
+        # save model if successful
+        if (!is.null(rf)) saveRDS(rf, rf_filename)
+        
+        
+        # return(rf)
+      }
+      # else{
+      #     rf = readRDS(rf_filename)
+      #     return(rf)
+      # }
+    })
+    
+    
+    #----analyze random forest results----
+    rffl = list.files(rf_dir, full.names=T, recursive=T, pattern = '\\.rds$')
+    rf_l = lapply(rffl, readRDS)
+    
+    #make tibble to store info
+    rf_ids = basename(file_path_sans_ext(rffl))
+    
+    rf_df = tibble(
+      id = rf_ids,
+      dataset = basename(dirname(dirname(rffl))),
+      block_id = basename(dirname(rffl)),
+      OOBE = sapply(rf_l, function(x)x$prediction.error)
+    ) |>
+      mutate(acquisition_date = as.Date(paste0( #get acquisition date
+        substr(id, 1, 4), "-",  # year
+        substr(id, 5, 6), "-",  # month
+        substr(id, 7, 8)        # day
+      ))) |>
+      mutate(overall_accuracy = 1 - OOBE) |>
+      left_join(results_meta_df, by = c('id', 'dataset', 'block_id', 'acquisition_date')) |>
+      filter(
+        # month %in% c(5,6,7,8,9),
+             dataset != 'SM')
+    
+    #train interrupted time series model for each RF dataset
+    datasets = str_remove(dataset_strings, '/')
+    datasets = datasets[!str_detect(datasets, 'SM')]
+    datasets=c('Z','Zrobust','Non-normalized')
+    
+    rf_lm_l = pblapply(datasets, function(x){
+      rf_df_sub = rf_df |>
+        filter(dataset == x)
+      lin_mod = lm(overall_accuracy ~ time_since_harvest_start * harvested, data = rf_df_sub)
+    })
+    names(rf_lm_l) = datasets
+    
+    #function for extracting model coefficients
+    extract_coefs_lm = function(a){ #x is a linear model created by lm
+      summ = summary(a)
+      m = summ$coefficients
+      df = as.data.frame(m)
+      df$term = row.names(summ$coefficients)
+      df$r.squared = summ$r.squared
+      return(df)
+    }
+    
+    rf_lm_coeffs = lapply(datasets, function(x){
+      m = rf_lm_l[[x]]
+      d = extract_coefs_lm(m)
+      d$dataset = x
+      return(d)
+    }) |> 
+      bind_rows() |>
+      mutate(Estimate_rounded = round(Estimate,3))
+    
+    rf_lm_coeffs_long = rf_lm_coeffs |>
+      pivot_longer(cols = c('Estimate'))
+    
+    ggplot(rf_lm_coeffs)+
+      geom_tile(aes(x = dataset, y = term, fill = Estimate))+
+      geom_text(aes(x = dataset, y = term, label = Estimate))
+    
+    #make predicted values (to visualize model)
+    rf_pred = pblapply(datasets, function(x){
+      rf_df_sub = rf_df %>% 
+        filter(dataset == x)
+      model = rf_lm_l[[x]]
+      rf_df_sub$predicted_OA = predict(model, newdata = rf_df_sub)
+      return(rf_df_sub)
+    }) |> bind_rows()
+    
+    #make counterfactual predictions (to visualize model)
+    rf_counterfactual_lm = pblapply(datasets, function(x){
+      rf_df_sub = rf_df |>
+        filter(acquisition_date<harvest_start_date)|>
+        filter(dataset == x)
+      lin_mod = lm(overall_accuracy ~ time_since_harvest_start * harvested, data = rf_df_sub)
+    })
+    names(rf_counterfactual_lm) = datasets
+    rf_counterfactual_pred = pblapply(datasets, function(x){
+      rf_df_sub = rf_df %>% 
+        filter(dataset == x)
+      model = rf_counterfactual_lm[[x]]
+      rf_df_sub$counterfactual_OA = predict(model, newdata = rf_df_sub)
+      return(rf_df_sub)
+    }) |> bind_rows()
+    
+    rf_df = left_join(rf_df, rf_pred) |> left_join(rf_counterfactual_pred)
+    
+    rf_df_plotting = rf_df |>
+      mutate(dataset = case_match(dataset,
+                                  'Z' ~ 'Z-score',
+                                  'Zrobust' ~ 'Robust Z-score',
+                                  .default='Non-normalized'))
+    
+    ggplot(rf_df_plotting, aes(x = acquisition_date, y = overall_accuracy))+
+      geom_point(shape = 1, alpha = 0.5)+
+      # geom_line(aes(y = predicted_OA, color = 'Linear prediction'))+
+      # geom_line(aes(y = counterfactual_OA, color='Counterfactual prediction'))+
+      # geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end'))+
+      geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start'))+
+      ylim(0.5,0.8)+
+      facet_grid(rows = vars(dataset))+
+      guides(linetype = guide_legend(title = NULL))+
+      xlab('Acquisition date')+
+      ylab('Overall accuracy')+
+      theme_classic()
+    
+    
+    
+    
+    
+    #----get RMSE between adjacent scenes----
+    
+    delta_dir = paste0(ps_dir,'/delta_scenes')
+    dir.check(delta_dir)
+    
+    delta_globs_dir = paste0(ps_dir,'/delta_global_vals')
+    dir.check(delta_globs_dir)
+    
+    # cl = makeCluster(4)
+    # plan('cluster', workers = cl)
+    plan('multisession', workers=4)
+    
+    future_lapply(dirs, function(d){
+      dat_dir = paste0(delta_dir,'/',basename(d))
+      dir.check(dat_dir)
+      
+      block_indir_l = list.dirs(d)
+      block_indir_l <- block_indir_l[block_indir_l != d]               # remove top-level dir
+      block_indir_l <- block_indir_l[str_detect(block_indir_l, "12N_T3")]
+      
+      
+      pblapply(block_indir_l, function(b){
+        block_dir = paste0(dat_dir,'/',basename(b))
+        dir.check(block_dir)
+        
+        #get list of scenes in dir
+        scenes_l = list.files(b, full.names = T, pattern = '\\.tif$')
+        
+        #subset dataframe to only include items which appear in this list
+        df_sub = results_12N_T3 |> 
+          filter(file_path %in% scenes_l) |>
+          distinct(file_path,id,acquisition_date) |>
+          #sort in increasing order of 
+          arrange(acquisition_date, file_path)
+        
+        pblapply(2:nrow(df_sub), function(i){
+          filename = paste0(block_dir,'/',df_sub$id[i],'.tif')
+          vals_file = paste0(delta_globs_dir,'/',basename(d),'_',basename(b),'_',df_sub$id[i],'.arrow')
+          
+          cat('\rProcessing',df_sub$file_path[i-1], '&', df_sub$file_path[i])
+          if(!file.exists(filename)){
+            r = rast(df_sub$file_path[i])
+            r = r[[feats_to_use]]
+            
+            r_past = rast(df_sub$file_path[i-1])
+            r_past = r_past[[feats_to_use]]
+            
+            r_past = resample(r_past,r)
+            r_c = crop(r,r_past,mask=T)
+            r_past_c = crop(r_past,r,mask=T)
+            
+            dr = r_c - r_past_c
+            writeRaster(dr, filename)
+          } else {
+            rd = rast(filename)
+          }
+          
+          if(!file.exists(vals_file)){
+            
+            
+            dv = global(dr, fun = c("max", "min", "mean", "sum", "range", "rms", "sd", "std", "isNA", "notNA"), na.rm=T)
+            dv = cbind(dv, 
+                       global(dr, median, na.rm=T) |> rename(median = global))
+            dv$dataset = d
+            dv$block_id = b
+            dv$acquisition_date = df_sub$acquisition_date[i]
+            dv$id = df_sub$id[i]
+            dv$file_path = df_sub$file_path[i]
+            
+            dv = cbind(dv, rmse(r_c, r_past_c, normalise_rmse = T, method = 'iqr'))
+            
+            
+            if(!file.exists(vals_file)){write_feather(dv,vals_file)}
+          }
+        })
+      })
+    })
+    
+    plan('sequential')
+    # stopCluster(cl)
+    
+  }
+  #----analyze feature importance and correlations between features----
+  
+  #get vector of high-quality images from each block
+  max_valid_pixels_byblock = results_meta_df |>
+    group_by(block_id)|>
+    summarise(max_valid_pixels = max(notNA))
+  
+  qual_df = results_meta_df |>
+    left_join(max_valid_pixels_byblock, by=c('block_id')) |>
+    filter(notNA >= 0.95*max_valid_pixels,
+           # month %in% c(6,7,8,9)
+    ) |>
+    distinct(id, block_id, month, acquisition_year, keep_all=T)
+  
+  #load high-quality rasters
+  hq_rl = lapply(1:nrow(qual_df), function(i){
+    id = high_qual_df$id[i]
+    block = high_qual_df$block_id[i]
+    path = paste0(sm_dir,'/',block,'/',id,'.tif')
+    r = rast(path)
+    if(names(r)[35]=='TVI'){r = r[[-35]]}
+    if(names(r)[33]=='TVI'){r = r[[-33]]}
+    return(r)
+  })
+  
+  #inspect plots
+  il = lapply(hq_rl, function(x)x[['RVI']])
+  names(il) = high_qual_df$id
+  list_plot(il)
+  
+  #get values from each scene
+  hq_vl = pblapply(hq_rl, function(x)values(x,dataframe=T))
+  hq_v = rbindlist(hq_vl) |>
+    select(-EVI2,-NRVI,-VARIgreen) |> na.omit()
+  nrow(hq_v)
+  
+  #principal component analysis
+  p = prcomp(hq_v|>
+               select(-coastal_blue,-blue,-green_i,-green,-yellow,-red,-rededge,-nir)#exclude raw bands
   )
-  # |>
-  # results_df = results_df |>
-  #   left_join(harvest_dates_df, by = 'block_id') |>
-  #   mutate(harvest_date = as.Date(paste0(harvest_month, '-01')))
-  # #calculate time since harvest
-  # results_df = results_df |>
-  #   mutate(months_since_harvest = as.numeric(acquisition_date2 - harvest_date)/30.44) |>
-  #   mutate(harvested = ifelse(acquisition_date2 < harvest_date,0,1)) |>
-  #   left_join(tibble(acquisition_date2 = sort(unique(results_df$acquisition_date2)),
-  #                    acquisition_date_ordinal = as.numeric(1:length(unique(results_df$acquisition_date2)))))
-  # #rescale JM distance to give it the range [0-1] so that beta regression can be applied to both AUC and JMD
-  # results_df = results_df |>
-  #   mutate(jmd_scaled = jeffries_matusita_dist/sqrt(2))
-  # 
-  # #make dataframe that only has the results from the tests (i.e. remove unnecessary rows)
-  # test_results_df = results_df |> filter(block_pixel_stratum == 'Total') |> dplyr:: select(-block_pixel_stratum)
-  # 
+  summary(p) #most variance explained by first two PCs
+  rotations = p$rotation#[,1:2]
+  rotations_df = as.data.frame(rotations) |> 
+    mutate(var_name = rownames(rotations))
+  rotations_df_long = rotations_df |>
+    pivot_longer(cols = colnames(rotations),names_to = 'PC',values_to = 'rotation')
+  
+  ggplot(rotations_df_long |> filter(PC %in% c('PC1','PC2')))+
+    geom_tile(aes(x = PC,y=var_name,fill=rotation))+
+    scale_fill_viridis_c()
+  
+  library(ggrepel)
+  ggplot(rotations_df, aes(x = PC1, y = PC2, label=var_name))+
+    geom_point()+
+    geom_label_repel(max.overlaps = Inf
+                     ,box.padding = 0.7
+                     ,min.segment.length = 0.2
+    )
+  
+  #do correlation matrix
+  library(corrplot)
+  
+  cm = cor(hq_v, method = 'pearson')
+  corrplot(cm)
+  
+  cm_sub=cm[9:nrow(cm),9:ncol(cm)]
+  corrplot(cm_sub)
   
   
+  cm_sub_summ = tibble(var_name = colnames(cm_sub),
+                       mean_cor = rowMeans(cm_sub),
+                       tot_cor = rowSums(cm_sub)) |>
+    mutate(abs_mean_cor = abs(mean_cor))
+  cm_sub_summ_long =cm_sub_summ |> 
+    pivot_longer(cols = c('mean_cor', 'tot_cor'), names_to = 'val_type', values_to = 'score')
+  ggplot()+
+    geom_tile(data=cm_summ_long |> filter(val_type=='mean_cor'), aes(x = val_type, y = var_name, fill = score))+
+    scale_fill_viridis_c()
   
+  
+  indices_to_use = c('BI', 'MSAVI','SR','Hue','NDVI')
   #----plotting vegetation indices over time----
   # {
   #   indices = c(
@@ -867,9 +1473,127 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
   # }
   
   
-  }
+}
 
-#----get RMSE between adjacent scenes in each block----
+
+#----plotting----
+
+# nt3_r_l = pblapply(1:nrow(results_12N_T3 |> filter(dataset=='Non-normalized')), function(i){
+#   d = results_12N_T3 |> filter(dataset == 'Non-normalized',
+#                                block_pixel_stratum=='Total')
+#   f = d$file_path[i]
+#   r = rast(f)
+#   return(r)
+# })
+
+id_ext = '20220901_184746_98_24a4.tif'
+
+nn_id_ext = paste0(ps_dir,'/Non-normalized_REDO/12N_T3/',id_ext)
+
+sample_nn_rast_preharv = rast(nn_id_ext)
+sample_nn_rast_preharv = sample_nn_rast_preharv[[feats_to_use]]
+
+
+layer_plots = pblapply(names(sample_nn_rast_preharv), function(x){
+  
+  layr = sample_rast_preharv[[x]]
+  
+  p = ggplot()+
+    geom_spatraster(data = layr)+
+    facet_wrap(~lyr)+
+    scale_fill_viridis_c(option='viridis', na.value = 'white', name = 'Value')+
+    theme_classic()+
+    # coord_equal(expand = FALSE) +
+    theme(
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    )+
+    theme(legend.position = 'none')
+  return(p)
+  
+})
+
+combined_layers_plot = wrap_plots(layer_plots, nrow=1)
+# combined_layers_plot
+
+z_id_ext = paste0(ps_dir,'/Z_REDO/12N_T3/',id_ext)
+zr_id_ext = paste0(ps_dir,'/Zrobust_REDO/12N_T3/',id_ext)
+
+sample_z_rast_preharv = rast(z_id_ext)
+sample_zr_rast_preharv = rast(zr_id_ext)
+
+combined_ndvi = c(
+  sample_nn_rast_preharv[['NDVI']],
+  sample_z_rast_preharv[['NDVI']],
+  sample_zr_rast_preharv[['NDVI']]
+)
+names(combined_ndvi) = c('Non-normalized NDVI', 'Z NDVI', 'Zr NDVI')
+
+ggplot()+
+  geom_spatraster(data = combined_ndvi)+
+  facet_wrap(~lyr)+
+  scale_fill_viridis_c(option='viridis', na.value = 'white', name = 'Value')+
+  theme_classic()+
+  # theme(legend.position = 'none')+
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+ndvi_plots = pblapply(names(combined_ndvi), function(x){
+  
+  layr = combined_ndvi[[x]]
+  
+  p = ggplot()+
+    geom_spatraster(data = layr)+
+    facet_wrap(~lyr)+
+    scale_fill_viridis_c(option='viridis', na.value = 'white', name = 'Value')+
+    theme_classic()+
+    # coord_equal(expand = FALSE) +
+    theme(
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    )+
+    theme(legend.position = 'none')
+  return(p)
+})
+ndvi_combined_plot = wrap_plots(ndvi_plots)
+ndvi_combined_plot
+
+
+#plot temporal resolution
+
+temp_res_nt3 = results_12N_T3 |>
+  distinct(id, acquisition_date, acquisition_year, acquisition_month_day) |>
+  mutate(month_day_dummy = as.Date(paste0('2000-',acquisition_month_day)))
+
+ggplot(temp_res_nt3, aes(x = month_day_dummy, y = 0))+
+  geom_point(alpha = 0.3, color = 'purple4')+
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  facet_grid(rows = vars(acquisition_year))+
+  theme_classic()+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major.x = element_line(color = "grey80"),
+        panel.grid.minor.x = element_blank())+
+  xlab('Acquisition date')
+
+dates = unique(temp_res_nt3$acquisition_date) |> sort()
+date_gaps = sapply(2:length(dates), function(i){
+  d = dates[i]
+  d_past = dates[i-1]
+  gap = d - d_past
+  return(gap)
+})
+mean(date_gaps)
+
+#plot sample images
+
+sample_ids
 
 #----save raw values to datafiles----
 
@@ -878,70 +1602,71 @@ dir.check(data_tables_dir)
 
 library(arrow)
 
-plan('multisession', workers = 4)
+plan('multisession', workers = 10)
 
 pblapply(dirs, function(x){
-  
+
   dataset = basename(x)
   dataset_dir = paste0(data_tables_dir,'/',dataset) #create subdirectory
   dir.check(dataset_dir)
-  
+
   block_subdirs = list.dirs(x, full.names = T)[x != list.dirs(x, full.names = T)]
-  
+  bock_subdirs = block_subdirs[str_detect(block_subdirs,'12N_T3')]
+
   pblapply(block_subdirs, function(y){
-    
-    block = basename(y) 
+
+    block = basename(y)
     block_dir = paste0(dataset_dir, '/', block)
     dir.check(block_dir)
-    
+
     rasters = list.files(y, full.names = T, pattern = '\\.tif$') #get list of rasters
-    
+
     pblapply(rasters, function(z){
-      
+
       id = file_path_sans_ext(basename(z))
-      
+
       filename = paste0(block_dir,'/',id,'.parquet')
       print(paste('Processing',filename))
       if(!file.exists(filename)){
-        
+
         #load raster
         r = rast(z)
-        
+
         if(names(r)[35] == 'TVI'){r = r[[-35]]} #get rid of extra TVI layer
-        
+
         #load lidar change raster
         lid = rast(lidar_files[[block]])
         names(lid) = 'CHM_change'
-        
+
         #resample lidar, combine with scene data
         if(ext(r) != ext(lid) | !identical(res(r), res(lid))){
           lid = resample(lid, r)
         }
-        
+
         r = c(r, lid)
-        
+
         #get values
         v = values(r, dataframe = T) |> setDT()
-        
+
         v[, X := xFromCell(r,1:ncell(r))] #get X values of cells
-        
+
         v[, Y := yFromCell(r,1:ncell(r))] # get y values of cells
-        
+
         v[, block_id := block] #add block_id
-        
+
         v[, dataset := dataset] #add dataset
-        
+
         v[, cellnum := 1:ncell(r)] #assign number to each cell
-        
+
         v[, id := id] #add id
-        
+
         v[, acquisition_date := as.Date(paste0( #get acquisition date
           substr(id, 1, 4), "-",  # year
           substr(id, 5, 6), "-",  # month
           substr(id, 7, 8)        # day
         ))]
-        
-        
+
+
         #write data table
         write_parquet(v, filename)
       }
