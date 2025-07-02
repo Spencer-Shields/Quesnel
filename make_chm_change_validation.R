@@ -15,8 +15,8 @@ library(data.table)
 dir = 'data/Quesnel_thinning'
 d_l = list.dirs(dir, full.names = T)
 
-chm_post_dir = d_l[str_detect(d_l, 'post')]
-chm_pre_dir = d_l[str_detect(d_l, 'pre')]
+chm_post_dir = d_l[str_detect(d_l, 'chm_post')]
+chm_pre_dir = d_l[str_detect(d_l, 'chm_pre')]
 
 chm_post_files = list.files(chm_post_dir, full.names = T)
 chm_post_files = chm_post_files[str_detect(chm_post_files, 'tif$')]
@@ -117,10 +117,50 @@ otsu_l = pbsapply(names(change_rasts_clipped), function(x){
 change_df = change_df %>% 
   left_join(data.frame(block = names(otsu_l), otsu_threshold = otsu_l), by = 'block')
 
-ggplot(data = change_df)+
-  geom_density(aes(x = vals.Z))+
-  geom_vline(aes(xintercept = otsu_threshold, linetype = 'Otsu threshold'))+
+otsu_t = round(otsu_l[['12N_T3']],2)
+
+#plot just 12nt3
+ggplot(data = change_df |> filter(block=='12N_T3'))+
+  annotate('rect', xmin=-Inf, xmax=otsu_t, ymin=-Inf, ymax = Inf,
+           fill = 'lightblue', alpha = 0.3)+
+  annotate('text', x = -20, y = 0.16, label = 'Thinned', color = 'blue')+
+  annotate('rect', xmin= otsu_t, xmax = Inf, ymin=-Inf, ymax = Inf,
+           fill = 'lightyellow', alpha = 0.5)+
+  annotate('text', x = 20, y = 0.16, label = 'Not thinned', color = 'yellow4')+
+  geom_density(aes(x = vals.Z),fill='seagreen')+
+  geom_vline(aes(xintercept = otsu_threshold
+                 # , linetype = 'Otsu threshold'
+                 )
+             ,color='darkred'
+             )+
+  annotate("text", x = otsu_t+1, y = 0.16, label = paste0("Thinning threshold: ",otsu_t)
+           , angle = 0, vjust = -0.5, hjust = 0, color = 'darkred')+
+  ylab('Density')+
+  theme_classic()+
   xlab("Height change (m)")+
+  theme(legend.position = NULL)
+  
+
+#plot all
+ggplot(data = change_df)+
+  # annotate('rect', xmin=-Inf, xmax=otsu_t, ymin=-Inf, ymax = Inf,
+  #          fill = 'lightblue', alpha = 0.3)+
+  # annotate('text', x = -20, y = 0.16, label = 'Thinned', color = 'blue')+
+  # annotate('rect', xmin= otsu_t, xmax = Inf, ymin=-Inf, ymax = Inf,
+  #          fill = 'lightyellow', alpha = 0.5)+
+  # annotate('text', x = 20, y = 0.16, label = 'Not thinned', color = 'yellow4')+
+  geom_density(aes(x = vals.Z),fill='seagreen')+
+  geom_vline(aes(xintercept = otsu_threshold
+                 # , linetype = 'Otsu threshold'
+  )
+  ,color='darkred'
+  )+
+  # annotate("text", x = otsu_t+1, y = 0.16, label = paste0("Thinning threshold: ",otsu_t)
+  #          , angle = 0, vjust = -0.5, hjust = 0, color = 'darkred')+
+  ylab('Density')+
+  theme_classic()+
+  xlab("Height change (m)")+
+  theme(legend.position = NULL)+
   facet_grid(vars(block))
 
 #save otsu thresholds
@@ -194,8 +234,8 @@ pblapply(1:length(change_rasts_clipped), function(i){
 
 #----make road and non-vegetated ground mask----
 
-blocks_scene_p = st_transform(blocks_p, crs(scene_rasts[[1]])) #reproject blocks to match scene crs
-blocks_bm_p = st_transform(blocks_p, crs(bm_rasts[[1]]))
+blocks_scene_p = project(blocks, crs(scene_rasts[[1]])) #reproject blocks to match scene crs
+blocks_bm_p = project(blocks, crs(bm_rasts[[1]]))
 
 pre_threshold = 0.5
 post_threshold = 0.3
@@ -274,6 +314,38 @@ resample_mask = pblapply(blocks_, function(x){
   mrs = resample(m, scene)
   return(mrs)
 })
+
+#----make map of chm and PS data----
+
+library(tmap)
+library(tidyterra)
+
+#load combined lidar data
+combined_lid_files = list.files(combined_lid_dir, full.names=T)
+
+blocks_v = vect(blocks)
+block_12nt3 = blocks_v[blocks_v$BLOCKNUM=='12N_T3']
+
+bs = '12N_T3'
+
+
+combined_lid_files = list.files(combined_lid_dir, full.names=T)
+
+comb_lid_12nt3 = rast(combined_lid_files[str_detect(combined_lid_files,bs)])
+
+names(comb_lid_12nt3) = c('July 2021 canopy height', 'October 2024 canopy height', 'Height change')
+
+ggplot()+
+  geom_spatraster(data = comb_lid_12nt3)+
+  facet_wrap(~lyr)+
+  scale_fill_viridis_c(option='viridis', na.value = 'white', name = 'Value')+
+  theme_classic()+
+  # coord_equal(expand = FALSE) +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
 
 # scene_nonveg_mask_dir = paste0(dir,'/nonveg_mask_scene_pre=',pre_threshold,'_post=',post_threshold)
 # dir.check(scene_lid_dir)

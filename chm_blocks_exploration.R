@@ -61,3 +61,23 @@ b = st_transform(b, crs= 'WGS84')
 b_filename = 'data/Quesnel_thinning/AOI_fullsite_wgs84.geojson'
 if(!file.exists(b_filename)){st_write(b, b_filename)}
 st_read(b_filename)
+
+#----make map of study area with chm data----
+
+library(tmap)
+library(tidyterra)
+
+blocks_v = vect(blocks)
+block_12nt3 = blocks_v[blocks_v$BLOCKNUM=='12N_T3']
+
+i = 7
+
+chm = c(chm_pre_l[[i]], chm_post_l[[i]])
+
+ggplot() +
+  geom_spatraster(data = chm_pre_l[[7]], aes(fill = Z)) +
+  scale_fill_viridis_c(option='turbo', aesthetics = 'fill')+
+  geom_spatvector(data = block_12nt3, color = 'red', fill=NA)
+  
+
+

@@ -63,3 +63,8 @@ b = st_transform(b, crs= 'WGS84')
 b_filename = 'data/AOI_fullsite_wgs84.kml'
 if(!file.exists(b_filename)){st_write(b, b_filename)}
 st_read(b_filename)
+
+#get area of bbox and area of individual thinning blocks
+blocks = blocks |> 
+  mutate(area_m2 = st_area(geom)) |>
+  mutate(area_ha = area_m2/10000)

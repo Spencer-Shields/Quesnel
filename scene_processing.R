@@ -39,6 +39,10 @@ blocks = st_read('data/Quesnel_thinning/12l_12n_bdy.geojson')
 
 thinning_block_ids = blocks$BLOCKNUM #get ids of thinning blocks
 
+#load harvest dates
+harvest_dates_file = 'data/Quesnel_thinning/harvest_dates.csv'
+harvest_dates_df = read_csv(harvest_dates_file)
+
 #load Otsu thresholds
 otsu_df = read_csv("data/Quesnel_thinning/Otsu_change_thresholds.csv")
 
@@ -933,7 +937,7 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
       left_join(results_meta_df, by = c('id', 'dataset', 'block_id', 'acquisition_date')) |>
       filter(
         # month %in% c(5,6,7,8,9),
-             dataset != 'SM')
+        dataset != 'SM')
     
     #train interrupted time series model for each RF dataset
     datasets = str_remove(dataset_strings, '/')
@@ -1063,21 +1067,22 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
           vals_file = paste0(delta_globs_dir,'/',basename(d),'_',basename(b),'_',df_sub$id[i],'.arrow')
           
           cat('\rProcessing',df_sub$file_path[i-1], '&', df_sub$file_path[i])
+          # if(!file.exists(filename)){
+          r = rast(df_sub$file_path[i])
+          r = r[[feats_to_use]]
+          
+          r_past = rast(df_sub$file_path[i-1])
+          r_past = r_past[[feats_to_use]]
+          
+          r_past = resample(r_past,r)
+          r_c = crop(r,r_past,mask=T)
+          r_past_c = crop(r_past,r,mask=T)
+          
           if(!file.exists(filename)){
-            r = rast(df_sub$file_path[i])
-            r = r[[feats_to_use]]
-            
-            r_past = rast(df_sub$file_path[i-1])
-            r_past = r_past[[feats_to_use]]
-            
-            r_past = resample(r_past,r)
-            r_c = crop(r,r_past,mask=T)
-            r_past_c = crop(r_past,r,mask=T)
-            
             dr = r_c - r_past_c
             writeRaster(dr, filename)
           } else {
-            rd = rast(filename)
+            dr = rast(filename)
           }
           
           if(!file.exists(vals_file)){
@@ -1091,6 +1096,7 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
             dv$acquisition_date = df_sub$acquisition_date[i]
             dv$id = df_sub$id[i]
             dv$file_path = df_sub$file_path[i]
+            dv$var_name = rownames(dv)
             
             dv = cbind(dv, rmse(r_c, r_past_c, normalise_rmse = T, method = 'iqr'))
             
@@ -1105,6 +1111,12 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
     # stopCluster(cl)
     
   }
+  #read global delta vals files
+  delta_globals_files = list.files(delta_globs_dir, full.names = T)
+  delta_globals_df = pblapply(delta_globals_files, read_feather) |> rbindlist()
+  
+  nrmse_summ = delta_globals_df |> group_by()
+  
   #----analyze feature importance and correlations between features----
   
   #get vector of high-quality images from each block
@@ -1476,6 +1488,17 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
 }
 
 
+#----use z-normalized timeseries for change characterization----
+{
+  #----select dates to test for change----
+  change_dates_interval = c('2022-12-01', '2023-03-01') #define
+  
+  #----speckle filtering----
+  library(whitebox)
+  
+  
+  
+}
 #----plotting----
 
 # nt3_r_l = pblapply(1:nrow(results_12N_T3 |> filter(dataset=='Non-normalized')), function(i){
@@ -1496,7 +1519,7 @@ sample_nn_rast_preharv = sample_nn_rast_preharv[[feats_to_use]]
 
 layer_plots = pblapply(names(sample_nn_rast_preharv), function(x){
   
-  layr = sample_rast_preharv[[x]]
+  layr = sample_nn_rast_preharv[[x]]
   
   p = ggplot()+
     geom_spatraster(data = layr)+
@@ -1591,9 +1614,57 @@ date_gaps = sapply(2:length(dates), function(i){
 })
 mean(date_gaps)
 
-#plot sample images
+#----plot sample images
 
-sample_ids
+redo_datasets = c('Z_REDO', 'Zrobust_REDO', 'Non-normalized_REDO')
+redo_dirs = paste0(ps_dir,'/',redo_datasets,'/12N_T3')
+
+redo_files_lists = lapply(redo_dirs, function(x)list.files(x,full.names = T))
+names(redo_files_lists) = redo_datasets
+
+sample_ids = c("20210626_182716_53_2235"
+               , "20230123_184930_42_248f"
+               # ,  "20230128_181143_14_241b"
+               ,'20230128_185503_32_2473'
+               ,"20230129_181440_00_2442"
+               ,'20241011_192907_10_251a')
+
+
+sample_timeseries_rasts = pblapply(redo_dirs, function(x){
+  r_l = pblapply(sample_ids, function(y){
+    path = paste0(x,'/',y,'.tif')
+    r = rast(path)
+    return(r)
+  })
+  return(r_l)
+})
+names(sample_timeseries_rasts) = str_remove(redo_datasets, '_REDO')
+
+a = sample_timeseries_rasts$Z[[3]]
+ggRGB(img = a, r = 6, g = 4, b = 2)
+
+
+ndvi_timeseries_rasts = pblapply(redo_dirs, function(x){
+  ndvi_l = pblapply(sample_ids, function(y){
+    path = paste0(x,'/',y,'.tif')
+    r = rast(path)
+    ndvi = r[['NDVI']]
+    return(ndvi)
+  })
+  ndvi_rast = rast(ndvi_l)
+  
+  acquisition_dates <- as.Date(substr(sample_ids, 1, 8), format = "%Y%m%d")
+  
+  names(ndvi_rast)= acquisition_dates
+  return(ndvi_rast)
+})
+names(ndvi_timeseries_rasts) = str_remove(redo_datasets, '_REDO')
+
+z_ndvi_plot = ggplot()+
+  geom_spatraster(data = ndvi_timeseries_rasts$Z)+
+  facet_wrap(~lyr)
+z_ndvi_plot
+
 
 #----save raw values to datafiles----
 
@@ -1602,79 +1673,79 @@ dir.check(data_tables_dir)
 
 library(arrow)
 
-plan('multisession', workers = 10)
+# plan('multisession', workers = 10)
 
 pblapply(dirs, function(x){
-
+  
   dataset = basename(x)
   dataset_dir = paste0(data_tables_dir,'/',dataset) #create subdirectory
   dir.check(dataset_dir)
-
+  
   block_subdirs = list.dirs(x, full.names = T)[x != list.dirs(x, full.names = T)]
   bock_subdirs = block_subdirs[str_detect(block_subdirs,'12N_T3')]
-
+  
   pblapply(block_subdirs, function(y){
-
+    
     block = basename(y)
     block_dir = paste0(dataset_dir, '/', block)
     dir.check(block_dir)
-
+    
     rasters = list.files(y, full.names = T, pattern = '\\.tif$') #get list of rasters
-
+    
     pblapply(rasters, function(z){
-
+      
       id = file_path_sans_ext(basename(z))
-
+      
       filename = paste0(block_dir,'/',id,'.parquet')
       print(paste('Processing',filename))
       if(!file.exists(filename)){
-
+        
         #load raster
         r = rast(z)
-
+        
         if(names(r)[35] == 'TVI'){r = r[[-35]]} #get rid of extra TVI layer
-
+        
         #load lidar change raster
         lid = rast(lidar_files[[block]])
         names(lid) = 'CHM_change'
-
+        
         #resample lidar, combine with scene data
         if(ext(r) != ext(lid) | !identical(res(r), res(lid))){
           lid = resample(lid, r)
         }
-
+        
         r = c(r, lid)
-
+        
         #get values
         v = values(r, dataframe = T) |> setDT()
-
+        
         v[, X := xFromCell(r,1:ncell(r))] #get X values of cells
-
+        
         v[, Y := yFromCell(r,1:ncell(r))] # get y values of cells
-
+        
         v[, block_id := block] #add block_id
-
+        
         v[, dataset := dataset] #add dataset
-
+        
         v[, cellnum := 1:ncell(r)] #assign number to each cell
-
+        
         v[, id := id] #add id
-
+        
         v[, acquisition_date := as.Date(paste0( #get acquisition date
           substr(id, 1, 4), "-",  # year
           substr(id, 5, 6), "-",  # month
           substr(id, 7, 8)        # day
         ))]
-
-
+        
+        
         #write data table
         write_parquet(v, filename)
       }
     }
-    ,cl='future'
+    # ,cl='future'
     )
   })
 }
 # ,cl='future'
 )
-plan('sequential')
+# plan('sequential')
