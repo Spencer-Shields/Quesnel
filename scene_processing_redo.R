@@ -950,12 +950,6 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
   #get full list of files to test
   all_files_totest = unique(results_all_filt$file_path)
   
-  #load chm_change file
-  chm = lidar_files[str_detect(lidar_files, '12N_T3')] |> rast()
-  ht = otsu_df$chm_change_otsu_threshold[otsu_df$block_id=='12N_T3']
-  thinning_binary = ifel(chm <= ht,1,0)
-  names(thinning_binary) = 'thinned'
-  
   pblapply(all_files_totest, function(f){
     
     #get dataset from input filepath, create output directory if necessary
@@ -972,8 +966,8 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
     rf_filename = paste0(block_dir,'/',id,'.rds')
     
     #run random forest model if output file does not exist
-    cat('\rProcessing ',rf_filename)
-    cat('\rProcessing',f)
+    # cat('\rProcessing ',rf_filename)
+    cat('\nProcessing',f)
     if(!file.exists(rf_filename)){
       
       #load and subset raster
@@ -1019,7 +1013,7 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
       
       # return(rf)
     }
-    cat('\rDone ',match(f,all_files_totest),'/',length(all_files_totest))
+    cat('\nDone ',match(f,all_files_totest),'/',length(all_files_totest))
     # else{
     #     rf = readRDS(rf_filename)
     #     return(rf)
@@ -1085,7 +1079,7 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
       # ,
       # 'SM_delta'
       # 'Non-normalized'
-    )
+    ) |> paste0('_REDO')
 
     months_ = c(
       '01','02','03',
@@ -1116,12 +1110,13 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
              , str_detect(block_id, paste(blocks_, collapse = "|"))
              , dataset %in% datasets_
              # , month %in% months_
-             , block_pixel_stratum %in% pixel_stratum)
+             , block_pixel_stratum %in% pixel_stratum) |>
+      mutate(dataset = str_remove(dataset, '_REDO'))
 
     #harvest pixel values
-    pixels_p = ggplot(subset_df, aes(x = acquisition_date2, y = mean)) +
+    pixels_p = ggplot(subset_df, aes(x = acquisition_date, y = mean)) +
       geom_point(aes(color = block_pixel_stratum))+
-      # geom_line(aes(color = block_pixel_stratum))+
+      geom_line(aes(color = block_pixel_stratum))+
       geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = block_pixel_stratum), alpha = 0.2, color = NA) +
       # geom_ribbon(aes(x = acquisition_date, ymin = mean-sds, ymax = mean+sds))+
       scale_x_date(
@@ -1131,19 +1126,22 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
       )+
       facet_grid(rows = vars(block_id), cols = vars(var_name), scales = 'free') +
       # geom_vline(xintercept = as.Date('2022-07-01')) + #12L_D345
-      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start date')) +
       ggtitle(unique(subset_df$dataset))+
       theme_classic()
 
     #logistic_AUC results
+    alpha = 0.5
     log_p = ggplot(subset_df |> filter(block_pixel_stratum == 'Thinned') #remove redundant info (since thinning, not_thinning, and total have same stats info)
-                   , aes(x = acquisition_date2, y = logistic_AUC)) +
+                   , aes(x = acquisition_date, y = logistic_AUC)) +
       geom_point()+
       # geom_line()+
       geom_point(data = subset_df|>
+                   mutate(logistic_sig = ifelse(logistic_p < alpha,1,0)) |>
                    filter(logistic_sig == 1)|>
                    mutate(label = paste0('p<',alpha)),
-                 aes(x = acquisition_date2, y =1, color=label), shape = 8)+ #significance of model
+                 aes(x = acquisition_date, y =1, color=label), shape = 8)+ #significance of model
       # scale_shape_manual(name = "Model Significance", values = c("Significant Model" = 8))+
       scale_x_date(
         date_breaks = "1 year",       # Major tick marks every year
@@ -1154,13 +1152,14 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
                  , scales = 'free'
       ) +
       ylim(0.3,1)+
-      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start date')) +
       ggtitle(unique(subset_df$dataset))+
       theme_classic()
 
     #jeffries-matusita results
     jm_p = ggplot(subset_df |> filter(block_pixel_stratum == 'Thinned') #remove redundant info (since thinning, not_thinning, and total have same stats info)
-                  , aes(x = acquisition_date2, y = jmd_scaled)) +
+                  , aes(x = acquisition_date, y = jmd_scaled)) +
       geom_point()+
       # geom_line()+
       # scale_shape_manual(name = "Model Significance", values = c("Significant Model" = 8))+
@@ -1173,144 +1172,216 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
                  , scales = 'free'
       ) +
       ylim(0,0.3)+
-      geom_vline(aes(xintercept = harvest_date, linetype = 'Harvest date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start date')) +
       ggtitle(unique(subset_df$dataset))+
       theme_classic()
-
+    
+    #fisher discriminant ratio
+    fdr_p = ggplot(subset_df |> filter(block_pixel_stratum == 'Thinned') #remove redundant info (since thinning, not_thinning, and total have same stats info)
+                   , aes(x = acquisition_date, y = fisher_discriminant_ratio)) +
+      geom_point()+
+      # geom_line()+
+      # scale_shape_manual(name = "Model Significance", values = c("Significant Model" = 8))+
+      scale_x_date(
+        date_breaks = "1 year",       # Major tick marks every year
+        date_labels = "%Y %m",           # Year labels on major ticks
+        date_minor_breaks = "1 month" # Minor tick marks every month
+      )+
+      facet_grid(rows = vars(block_id), cols = vars(var_name)
+                 , scales = 'free'
+      ) +
+      ylim(0,0.35)+
+      geom_vline(aes(xintercept = harvest_finish_date, linetype = 'Harvest end date')) + #get harvest date for each plot
+      geom_vline(aes(xintercept = harvest_start_date, linetype = 'Harvest start date')) +
+      ggtitle(unique(subset_df$dataset))+
+      theme_classic()
+    
     library(patchwork)
     pixels_p+log_p+jm_p+plot_layout(guides = 'collect')
+    
+    
   }
 
   #----statistical modelling to assess effect of harvesting on class separability----
-  # #define features and datasets that should be tested
-  # ps_feats = unique(test_results_df$var_name)
-  # ps_feats = ps_feats[!ps_feats %in% c('VARIgreen', 'max_DN', 'max')]
-  # 
-  # datasets = unique(test_results_df$dataset)
-  # datasets = datasets[datasets %in% c('Z', 'Non-normalized', 'SM', 'Zrobust')]
-  # 
-  # block_ids = unique(test_results_df$block_id)
+  #define features and datasets that should be tested
+  ps_feats = unique(test_results_df$var_name)
+  ps_feats = ps_feats[!ps_feats %in% c('VARIgreen', 'max_DN', 'max')]
+
+  datasets = unique(test_results_df$dataset)
+  # datasets = datasets[datasets %in% paste0(c('Z', 'Non-normalized', 'SM', 'Zrobust'),'_REDO')]
+
+  block_ids = unique(test_results_df$block_id)
   
-  #----LMMs for AUC and JM distance----
+  #----LMMs for AUC, JM distance, and fisher discriminant ratio----
   
   # plan('multisession', workers = 8)
-  # jmd_lm_list = pblapply(1:length(datasets), function(i){
-  #   
-  #   dsi = datasets[i]
-  #   
-  #   lm_l = pblapply(1:length(ps_feats), function(j){
-  #     
-  #     varj = ps_feats[j]
-  #     
-  #     #print for debugging
-  #     print(paste0(
-  #       'Processing ',i,'-',j,', ',dsi,'-',varj
-  #     ))
-  #     
-  #     dat = test_results_df |> filter(dataset == dsi,
-  #                                     var_name == varj)
-  #     
-  #     
-  #     # jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
-  #     #                  , data = dat
-  #     #                  ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
-  #     
-  #     jmd_lm = lmer(jmd_scaled ~ 1 + months_since_harvest * harvested + 
-  #                     (1 + months_since_harvest * harvested | block_id)
-  #                   , data = dat)
-  #     
-  #     return(jmd_lm)
-  #   })
-  #   names(lm_l) = ps_feats
-  #   return(lm_l)
-  # }
+  jmd_lm_list = pblapply(1:length(datasets), function(i){
+
+    dsi = datasets[i]
+
+    lm_l = pblapply(1:length(ps_feats), function(j){
+
+      varj = ps_feats[j]
+
+      #print for debugging
+      print(paste0(
+        'Processing ',i,'-',j,', ',dsi,'-',varj
+      ))
+
+      dat = test_results_df |> filter(dataset == dsi,
+                                      var_name == varj,
+                                      !is.na(jeffries_matusita_dist))
+
+
+      # jmd_lm = glmmTMB(jmd_scaled ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+      #                  , data = dat
+      #                  ,family=ordbeta(link="logit")) #ordered beta regression since the dataset includes zeroes and ones
+      
+      if(nrow(dat)>4*length(unique(dat$block_id))){
+      jmd_lm = lmer(jmd_scaled ~ 1 + months_since_harvest * harvested +
+                      (1 + months_since_harvest * harvested | block_id)
+                    , data = dat)
+
+      return(jmd_lm)
+      }
+    })
+    names(lm_l) = ps_feats
+    return(lm_l)
+  }
   # ,cl = 'future'
-  # )
-  # names(jmd_lm_list) = datasets
-  # 
-  # auc_lm_list = pblapply(1:length(datasets), function(i){
-  #   
-  #   dsi = datasets[i]
-  #   
-  #   lm_l = pblapply(1:length(ps_feats), function(j){
-  #     
-  #     varj = ps_feats[j]
-  #     
-  #     #print for debugging
-  #     print(paste0(
-  #       'Processing ',i,'-',j,', ',dsi,'-',varj
-  #     ))
-  #     
-  #     dat = test_results_df |> filter(dataset == dsi,
-  #                                     var_name == varj)
-  #     
-  #     # auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
-  #     #                  , data = dat
-  #     #                  ,family=beta_family(link="logit"))
-  #     
-  #     auc_lm = lmer(logistic_AUC ~ 1 + months_since_harvest * harvested + 
-  #                     (1 + months_since_harvest * harvested | block_id)
-  #                   , data = dat)
-  #     
-  #     return(auc_lm)
-  #   })
-  #   names(lm_l) = ps_feats
-  #   return(lm_l)
-  # }
+  )
+  names(jmd_lm_list) = datasets
+
+  auc_lm_list = pblapply(1:length(datasets), function(i){
+
+    dsi = datasets[i]
+
+    lm_l = pblapply(1:length(ps_feats), function(j){
+
+      varj = ps_feats[j]
+
+      #print for debugging
+      print(paste0(
+        'Processing ',i,'-',j,', ',dsi,'-',varj
+      ))
+
+      dat = test_results_df |> filter(dataset == dsi,
+                                      var_name == varj,
+                                      !is.na(logistic_AUC))
+
+      # auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+      #                  , data = dat
+      #                  ,family=beta_family(link="logit"))
+      
+      if(nrow(dat)>4*length(unique(dat$block_id))){
+      auc_lm = lmer(logistic_AUC ~ 1 + months_since_harvest * harvested +
+                      (1 + months_since_harvest * harvested | block_id)
+                    , data = dat)
+
+      return(auc_lm)
+      }
+      
+    })
+    names(lm_l) = ps_feats
+    return(lm_l)
+  }
   # ,cl = 'future'
-  # )
-  # names(auc_lm_list) = datasets
+  )
+  names(auc_lm_list) = datasets
   # plan('sequential')
-  # 
-  # #extract model coefficients and other info
-  # 
-  # extract_coefs_lme4 = function(L){ #L is a nested structure with lme4 models in lists according to feature in lists according to dataset
-  #   coefs_df_l = pblapply(datasets, function(x){
-  #     df_l = pblapply(ps_feats, function(y){
-  #       m = L[[x]][[y]]
-  #       s = summary(m)
-  #       coefs_df = s$coefficients |> as.data.frame()
-  #       coefs_df$model_terms = rownames(coefs_df)
-  #       coefs_df$AIC = AIC(m)
-  #       coefs_df$REML = REMLcrit(m)
-  #       coefs_df$dataset = x
-  #       coefs_df$var_name = y
-  #       
-  #       return(coefs_df)
-  #     })
-  #     df = bind_rows(df_l)
-  #     return(df)
-  #   })
-  #   df = bind_rows(coefs_df_l)
-  #   rownames(df) = NULL
-  #   return(df)
-  # }
-  # 
-  # jmd_coefs = extract_coefs_lme4(jmd_lm_list) |> 
-  #   mutate(Estimate_rounded = round(Estimate, 3)) |>
-  #   mutate(metric = 'Area Under Curve')
-  # auc_coefs = extract_coefs_lme4(auc_lm_list) |> 
-  #   mutate(Estimate_rounded = round(Estimate, 3)) |>
-  #   mutate(metric = 'Jeffries-Matusita distance')
-  # 
-  # coefs_combined_df = bind_rows(jmd_coefs, auc_coefs)
-  # 
-  # #plot results
-  # {
-  #   ggplot(data = auc_coefs |> filter(!model_terms %in% c('months_since_harvest', '(Intercept)')), aes(x = dataset, y = var_name))+
-  #     geom_tile(aes(fill = Estimate_rounded))+
-  #     geom_text(aes(label = Estimate_rounded))+
-  #     scale_fill_viridis_b()+
-  #     facet_grid(vars(model_terms))+
-  #     theme_classic()
-  #   
-  #   # ggplot(data = auc_coefs |> filter(model_terms %in% c('(Intercept)')), aes(x = dataset, y = var_name))+
-  #   #   geom_tile(aes(fill = Estimate_rounded))+
-  #   #   geom_text(aes(label = Estimate_rounded))+
-  #   #   scale_fill_viridis_b()+
-  #   #   facet_grid(vars(model_terms))+
-  #   #   theme_classic()
-  # }
+  
+  fdr_lm_list = pblapply(1:length(datasets), function(i){
+    
+    dsi = datasets[i]
+    
+    lm_l = pblapply(1:length(ps_feats), function(j){
+      
+      varj = ps_feats[j]
+      
+      #print for debugging
+      print(paste0(
+        'Processing ',i,'-',j,', ',dsi,'-',varj
+      ))
+      
+      dat = test_results_df |> filter(dataset == dsi,
+                                      var_name == varj,
+                                      !is.na(fisher_discriminant_ratio))
+      
+      # auc_lm = glmmTMB(logistic_AUC ~ acquisition_date_ordinal + harvested + (acquisition_date_ordinal * harvested | block_id)
+      #                  , data = dat
+      #                  ,family=beta_family(link="logit"))
+      
+      if(nrow(dat)>4*length(unique(dat$block_id))){
+        auc_lm = lmer(fisher_discriminant_ratio ~ 1 + months_since_harvest * harvested +
+                        (1 + months_since_harvest * harvested | block_id)
+                      , data = dat)
+        
+        return(auc_lm)
+      }
+      
+    })
+    names(lm_l) = ps_feats
+    return(lm_l)
+  }
+  # ,cl = 'future'
+  )
+  names(fdr_lm_list) = datasets
+
+  #extract model coefficients and other info
+
+  extract_coefs_lme4 = function(L){ #L is a nested structure with lme4 models in lists according to feature in lists according to dataset
+    coefs_df_l = pblapply(datasets, function(x){
+      df_l = pblapply(ps_feats, function(y){
+        m = L[[x]][[y]]
+        if(!is.null(m)){
+        s = summary(m)
+        coefs_df = s$coefficients |> as.data.frame()
+        coefs_df$model_terms = rownames(coefs_df)
+        coefs_df$AIC = AIC(m)
+        coefs_df$REML = REMLcrit(m)
+        coefs_df$dataset = x
+        coefs_df$var_name = y
+
+        return(coefs_df)
+        }
+      })
+      df = bind_rows(df_l)
+      return(df)
+    })
+    df = bind_rows(coefs_df_l)
+    rownames(df) = NULL
+    return(df)
+  }
+
+  jmd_coefs = extract_coefs_lme4(jmd_lm_list) |>
+    mutate(Estimate_rounded = round(Estimate, 3)) |>
+    mutate(metric = 'Area Under Curve')
+  auc_coefs = extract_coefs_lme4(auc_lm_list) |>
+    mutate(Estimate_rounded = round(Estimate, 3)) |>
+    mutate(metric = 'Jeffries-Matusita distance')
+  fdr_coefs = extract_coefs_lme4(fdr_lm_list) |>
+    mutate(Estimate_rounded = round(Estimate, 3)) |>
+    mutate(metric = 'Fisher discriminant ratio')
+
+  coefs_combined_df = bind_rows(jmd_coefs, auc_coefs, fdr_coefs)
+
+  #plot results
+  {
+    ggplot(data = fdr_coefs |> filter(!model_terms %in% c('months_since_harvest', '(Intercept)')), aes(x = dataset, y = var_name))+
+      geom_tile(aes(fill = Estimate_rounded))+
+      geom_text(aes(label = Estimate_rounded))+
+      scale_fill_viridis_b()+
+      facet_grid(vars(model_terms))+
+      theme_classic()
+
+    # ggplot(data = auc_coefs |> filter(model_terms %in% c('(Intercept)')), aes(x = dataset, y = var_name))+
+    #   geom_tile(aes(fill = Estimate_rounded))+
+    #   geom_text(aes(label = Estimate_rounded))+
+    #   scale_fill_viridis_b()+
+    #   facet_grid(vars(model_terms))+
+    #   theme_classic()
+  }
   
   
 }

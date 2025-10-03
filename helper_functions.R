@@ -44,6 +44,14 @@ list_plot_ggRGB = function(l, r = 3, g = 2, b = 1,...){
   par(mfrow = c(1,1))
 }
 
+
+#----plot object in new window----
+
+plotx = function(x){
+  x11()
+  plot(x)
+}
+
 #----define function for loading separate landsat bands into a spatraster stack----
 
 landstack = function(dir, what= 'bands'){
@@ -307,19 +315,58 @@ varig.vi = function(r, red = 3, green = 2, blue = 1){
   return(vi)
 }
 
+#----Calculate Yellow Normalized Difference Vegetation Index----
+yndvi.vi = function(r, yellow = 4, nir = 8){
+  vi = (r[[nir]] - r[[yellow]])/(r[[nir]] + r[[yellow]])
+  names(vi) = 'YNDVI'
+  return(vi)
+}
+
+#----Calculate EVI2 (since spectralIndices doesn't do this well for some reason)----
+evi2.vi = function(r, nir = 8, red = 6, G = 2.5){
+  vi = G*((r[[nir]] - r[[red]])/(r[[nir]]+(2.4*r[[red]])+1))
+  names(vi) = 'EVI2'
+  return(vi)
+}
+
 #----Calculate multiple vegetation indices for a spatraster by providing a list of functions ----
-rast.batch.functions = function(r, fl, rast_out = T, include_input = T, ...){
-  #apply a list of functions - including custom functions - which take the same arguments to a spatraster
-  #the purpose is to calculate multiple vegetation indices with one compact call using custom functions
-  #if rast_out ==T, result will be a spatraster, else result will be a list of spatrasters
-  result = lapply(fl, function(f)f(r,...))
+#old
+{
+# rast.batch.functions = function(r, fl, rast_out = T, include_input = T, ...){
+#   #apply a list of functions - including custom functions - which take the same arguments to a spatraster
+#   #the purpose is to calculate multiple vegetation indices with one compact call using custom functions
+#   #if rast_out ==T, result will be a spatraster, else result will be a list of spatrasters
+#   result = lapply(fl, function(f)f(r,...))
+#   
+#   if(rast_out==T){ #option to make result a spatraster
+#     result = rast(result)
+#   }
+#   
+#   if(include_input == T){
+#     result = c(r, result)
+#   }
+#   
+#   return(result)
+# }
+}
+
+rast.batch.functions <- function(r, fl, rast_out = TRUE, include_input = TRUE, ...){
+  # Capture all additional arguments
+  extra_args <- list(...)
   
-  if(rast_out==T){ #option to make result a spatraster
-    result = rast(result)
+  # Apply functions, passing the raster and all additional arguments
+  result <- lapply(fl, function(f){
+    func_args = names(formals(f)) #get arguments accepted by function f
+    valid_args <- extra_args[names(extra_args) %in% func_args] #filter out arguments not accepted by function f
+    do.call(f, c(list(r = r), valid_args)) #call function f
+  })
+  
+  if(rast_out == TRUE){
+    result <- rast(result)
   }
   
-  if(include_input == T){
-    result = c(r, result)
+  if(include_input == TRUE){
+    result <- c(r, result)
   }
   
   return(result)
@@ -350,8 +397,14 @@ find_substring = function(filepath, v, first = T){
   }
 }
 
+#----Calculate quantiles for a spatraster----
+
+rast_quantiles = function(r, q){
+  global(r, quantile, probs=q, na.rm=T)
+}
 
 #----Implement Otsu's method for SpatRasters----
+{
 # C++ implementation of Otsu's algorithm
 cppFunction('
 double otsuThresholdCpp(NumericVector values, int bins) {
@@ -553,8 +606,10 @@ otsu_multiband_fast <- function(rast, method="majority", bins=256, sample_size=N
     }
   }
 }
+}
 
 #----Implementation of DBSCAN for spatrasters----
+{
 # Define the optimized C++ functions for DBSCAN with spatial indexing
 sourceCpp(code='
 #include <RcppArmadillo.h>
@@ -748,6 +803,7 @@ List dbscan_cpp_optimized(NumericMatrix data, double eps, int minPts, List spati
 }
 ')
 
+
 # R function that uses the optimized C++ implementation
 dbscan_raster_rcpp_optimized <- function(rast, eps, minPts, variables = 1:nlyr(rast)) {
   # Extract coordinates and values
@@ -786,4 +842,5 @@ dbscan_raster_rcpp_optimized <- function(rast, eps, minPts, variables = 1:nlyr(r
     points = pts,
     n_clusters = result$n_clusters
   ))
+}
 }

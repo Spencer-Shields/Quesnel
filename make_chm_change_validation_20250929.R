@@ -45,6 +45,9 @@ total_area_ha = sum(areas)/10000
 
 #----Calculate difference rasters----
 
+chm_change_dir = 'data/Quesnel_thinning/chm_change'
+dir.check(chm_change_dir)
+
 change_rasts_l = pblapply(X = 1:length(post_rasts_common_l), function(i){
   post_rast = post_rasts_common_l[[i]]
   pre_rast = pre_rasts_common_l[[i]]
@@ -68,16 +71,12 @@ names(change_rasts_l) = chm_common_ids
 
 #----Export difference rasters----
 
-chm_change_dir = 'data/Quesnel_thinning/chm_change'
-dir.check(chm_change_dir)
-
 lapply(1:length(change_rasts_l), function(i){
   filename = paste0(chm_change_dir,'/',chm_common_ids[i],'.tif')
   if(!file.exists(filename)){
     writeRaster(change_rasts_l[[i]], filename)
   }
 })
-
 
 #----Look at histograms of difference rasters to establish harvest threshold----
 
@@ -109,29 +108,7 @@ otsu_l = pbsapply(names(change_rasts_clipped), function(x){
 change_df = change_df %>% 
   left_join(data.frame(block = names(otsu_l), otsu_threshold = otsu_l), by = 'block')
 
-otsu_t = round(otsu_l[['12N_T3']],2)
-
-#plot just 12nt3
-ggplot(data = change_df |> filter(block=='12N_T3'))+
-  annotate('rect', xmin=-Inf, xmax=otsu_t, ymin=-Inf, ymax = Inf,
-           fill = 'lightblue', alpha = 0.3)+
-  annotate('text', x = -20, y = 0.16, label = 'Thinned', color = 'blue')+
-  annotate('rect', xmin= otsu_t, xmax = Inf, ymin=-Inf, ymax = Inf,
-           fill = 'lightyellow', alpha = 0.5)+
-  annotate('text', x = 20, y = 0.16, label = 'Not thinned', color = 'yellow4')+
-  geom_density(aes(x = vals.Z),fill='seagreen')+
-  geom_vline(aes(xintercept = otsu_threshold
-                 # , linetype = 'Otsu threshold'
-                 )
-             ,color='darkred'
-             )+
-  annotate("text", x = otsu_t+1, y = 0.16, label = paste0("Thinning threshold: ",otsu_t)
-           , angle = 0, vjust = -0.5, hjust = 0, color = 'darkred')+
-  ylab('Density')+
-  theme_classic()+
-  xlab("Height change (m)")+
-  theme(legend.position = NULL)
-  
+# otsu_t = round(otsu_l[['12N_T3']],2)
 
 # #plot all
 # density_otsu_plot_0.25m=ggplot(data = change_df)+
@@ -196,20 +173,44 @@ pblapply(1:length(change_rasts_clipped), function(i){
 #----save change validation rasters for blocks which are resampled to match scenes----
 
 #get first file from each subdirectory so that there's one planetscope raster for each thinning block
-scene_dir = 'data/planet_scenes/Non-normalized'
+scene_dir = dirs[str_detect(dirs,'Z_')]
 scene_subdirs = list.dirs(scene_dir)
 scene_subdirs = scene_subdirs[scene_subdirs != scene_dir]
 scene_subdirs = scene_subdirs[!str_detect(scene_subdirs, 'NoChange')]
+
+# #resample based on a single scene which fully contains the AOI
+# scene_r = rast(list.files(scene_subdirs, recursive = T, full.names = T, pattern='\\.tif$')[1])
+# if(terra::relate(ext(blocks), ext(scene_r), 'within')[1,1]){
+#   
+#   #make output directory
+#   chm_change_dir_scene = paste0(chm_change_dir, '_scenes_',target_res)
+#   dir.check(chm_change_dir_scene)
+#   
+#   #resample chm_change rasters to match scenes, save
+#   pblapply(1:length(change_rasts_clipped), function(i){
+#     n = names(change_rasts_clipped)[i]
+#     filename = paste0(chm_change_dir_scene,'/',n, '.tif')
+#     if(!file.exists(filename)){
+#       chm = change_rasts_clipped[[n]]
+#       ps = scene_r
+#       chm_p = project(chm, ps)
+#       writeRaster(chm_p, filename)
+#     }
+#   })
+# }
+
 scene_rasts = lapply(scene_subdirs, function(x){
   fl = list.files(x, full.names = T)
-  r = rast(fl[1])
+  f = fl[1]
+  print(f)
+  r = rast(f)
   return(r)
 })
 scene_ids = basename(scene_subdirs)
 names(scene_rasts) = scene_ids
 
 #make output directory
-chm_change_dir_scene = paste0(chm_change_dir, '_scenes')
+chm_change_dir_scene = paste0(chm_change_dir, '_scenes_Res=',target_res)
 dir.check(chm_change_dir_scene)
 
 #resample chm_change rasters to match scenes, save
@@ -223,6 +224,7 @@ pblapply(1:length(change_rasts_clipped), function(i){
     writeRaster(chm_p, filename)
   }
 })
+
 
 #reload resampled change rasters
 chm_changes_scene = lapply(list.files(chm_change_dir_scene, full.names = T), rast)
@@ -238,12 +240,21 @@ change_scene_df_l = pblapply(1:length(chm_changes_scene), function(i){
 })
 change_scene_df = data.table::rbindlist(change_scene_df_l)
 
-
+#get otsu thresholds
 otsu_scene_l = pbsapply(names(chm_changes_scene), function(x){
     d = change_scene_df %>%
       filter(block == x) 
     t = otsuThresholdCpp(values = d[['vals.Z']], bins = 256)
   })
+
+#export otsu thresholds for planetscope data with target_resolution
+otsu_scene_tbl = tibble(
+  block_id = names(otsu_scene_l),
+  chm_change_otsu_threshold = otsu_scene_l
+)
+
+otsu_scene_file = paste0(dir,'/','Otsu_change_thresholds_Res=',target_res,'.csv')
+if(!file.exists(otsu_scene_file)){write_csv(otsu_tbl,otsu_scene_file)}
 
 #add otsu thresholds to dataframe
 change_scene_df = change_scene_df %>% 
@@ -283,38 +294,41 @@ change_df_combined_ = change_df_combined |> filter(vals.Z <= 10 & vals.Z >= -20)
 rect_text_data = change_df_combined_ |>
   distinct(block, resolution, otsu_threshold)
 
-#make density plots for each block at 0.25m and planetscope resolution with 
-ggplot(data = change_df_combined_ #|>filter(resolution=='3.76m') #filter used to tune plot parameters, comment out for final plot
-       )+
-  #color plot area
-  geom_rect(data = rect_text_data, aes(xmin = -Inf, xmax = otsu_threshold, ymin = -Inf, ymax = Inf, 
-                fill = "Thinned"), alpha = 1)+
-  geom_rect(data = rect_text_data,  aes(xmin = otsu_threshold, xmax = Inf, ymin = -Inf, ymax = Inf, 
-                fill = "Not thinned"), alpha = 0.5)+
-  scale_fill_manual(values = c("Thinned" = "lightyellow", "Not thinned" = "lightblue"),
-                    name = NULL)+
-  #add density plot
-  geom_density(aes(x = vals.Z),fill='seagreen')+
-  #add vertical line and text label for thinning threshold
-  geom_vline(data = rect_text_data, aes(xintercept = otsu_threshold
-                 , linetype = 'Thinning threshold'
-  )
-  ,color='darkred'
-  )+
-  scale_linetype_manual(values = c("Thinning threshold" = "solid"), 
-                        name = NULL)+
-  geom_text(data = rect_text_data, aes(x = otsu_threshold-2.5, label = round(otsu_threshold, 2)), 
-            y = Inf, vjust = 1.2, hjust = 0.5, color = 'darkred', 
-            # angle = 90, 
-            size = 3)+
-  ylab('Density')+
-  theme_classic()+
-  xlab("Height change (m)")+
-  # theme(legend.position = NULL)+
-  facet_grid(rows=vars(block), cols = vars(resolution))
+#make density plots for each block at 0.25m and planetscope scene resolution
+{
+# ggplot(data = change_df_combined_ #|>filter(resolution=='3.76m') #filter used to tune plot parameters, comment out for final plot
+#        )+
+#   #color plot area
+#   geom_rect(data = rect_text_data, aes(xmin = -Inf, xmax = otsu_threshold, ymin = -Inf, ymax = Inf, 
+#                 fill = "Thinned"), alpha = 1)+
+#   geom_rect(data = rect_text_data,  aes(xmin = otsu_threshold, xmax = Inf, ymin = -Inf, ymax = Inf, 
+#                 fill = "Not thinned"), alpha = 0.5)+
+#   scale_fill_manual(values = c("Thinned" = "lightyellow", "Not thinned" = "lightblue"),
+#                     name = NULL)+
+#   #add density plot
+#   geom_density(aes(x = vals.Z),fill='seagreen')+
+#   #add vertical line and text label for thinning threshold
+#   geom_vline(data = rect_text_data, aes(xintercept = otsu_threshold
+#                  , linetype = 'Thinning threshold'
+#   )
+#   ,color='darkred'
+#   )+
+#   scale_linetype_manual(values = c("Thinning threshold" = "solid"), 
+#                         name = NULL)+
+#   geom_text(data = rect_text_data, aes(x = otsu_threshold-2.5, label = round(otsu_threshold, 2)), 
+#             y = Inf, vjust = 1.2, hjust = 0.5, color = 'darkred', 
+#             # angle = 90, 
+#             size = 3)+
+#   ylab('Density')+
+#   theme_classic()+
+#   xlab("Height change (m)")+
+#   # theme(legend.position = NULL)+
+#   facet_grid(rows=vars(block), cols = vars(resolution))
+# 
+# pfile = 'figures/density_plots_0.25m_3.76m.png'
+# if(!file.exists(pfile)){ggsave(filename = pfile, dpi=600)}
+  }
 
-pfile = 'figures/density_plots_0.25m_3.76m.png'
-if(!file.exists(pfile)){ggsave(filename = pfile, dpi=600)}
 
 #----make road and non-vegetated ground mask----
 
