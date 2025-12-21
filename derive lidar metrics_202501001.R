@@ -1,25 +1,28 @@
-source('scene_setup_preprocessing_20250909.R')
+source('scene_global_stats_filtering_20250925.R')
 # source('scene_global_stats_filtering_20250925.R')
 
 lid_metrics_dir = paste0('data/lidar_metrics_Res=',target_res)
-dir(lid_metrics_dir)
+dir.check(lid_metrics_dir)
 
 lid_metrics_subdirs = list.dirs(lid_metrics_dir)
 lid_metrics_subdirs = lid_metrics_subdirs[!str_detect(lid_metrics_subdirs, lid_metrics_dir)]
   
   #----load packages, define directories----
-  
+
+#don't load these packages unless you need to (since they mess up terra plotting functions)  
+if(length(list.files(lid_metrics_dir, recursive = T)) %% length(block_ids) != 0){
   library(lidR)
   library(lasR)
-  library(tictoc)
+}
+library(tictoc)
   
-  parent_dir = 'data/quesnel_thinning_las'
-  
-  pre_dir = paste0(parent_dir,'/pre')
-  pre_blockdirs = list.dirs(pre_dir, recursive=F)
-  
-  post_dir = paste0(parent_dir,'/post')
-  post_blockdirs = list.dirs(post_dir, recursive=F)
+raw_las_parent_dir = "G:/quesnel_thinning_las"
+
+pre_dir = paste0(raw_las_parent_dir,'/pre')
+pre_blockdirs = list.dirs(pre_dir, recursive=F)
+
+post_dir = paste0(raw_las_parent_dir,'/post')
+post_blockdirs = list.dirs(post_dir, recursive=F)
   
   #----inspect point clouds----
   
@@ -44,7 +47,7 @@ lid_metrics_subdirs = lid_metrics_subdirs[!str_detect(lid_metrics_subdirs, lid_m
     ,'count'
   )
   
-  pipe = reader() + rasterize(target_res, operators = metrics, filter=keep_first())
+  pipe = lasR::reader() + lasR::rasterize(target_res, operators = metrics, filter=lasR::keep_first())
   
   #generate and save pre-harvest metrics
   {
@@ -104,9 +107,16 @@ lid_metrics_subdirs = lid_metrics_subdirs[!str_detect(lid_metrics_subdirs, lid_m
     toc()
   }
   
-  #detach lidR and lasR to avoid function namespace conflicts
-  detach('package:lidR', unload=T)
-  detach('package:lasR', unload=T)
+  #detach lidR and lasR to avoid function namespace conflicts 
+  # if('lidR' %in% loadedNamespaces()){detach('package:lidR', unload=T)} #check if package is loaded, remove if it is
+  # if('lasR' %in% loadedNamespaces()){detach('package:lasR', unload=T)}
+  for (pkg in c("lidR", "lasR")) {
+    if (paste0("package:", pkg) %in% search()) {
+      detach(paste0("package:", pkg), unload = TRUE, character.only = TRUE)
+    } else if (pkg %in% loadedNamespaces()) {
+      unloadNamespace(pkg)
+    }
+  }
   
   #generate and save change metrics
   {

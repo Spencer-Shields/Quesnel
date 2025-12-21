@@ -1,6 +1,7 @@
 #----packages----
 library(tidyverse)
 library(terra)
+library(tidyterra)
 library(RStoolbox)
 library(tools)
 library(sf)
@@ -37,9 +38,10 @@ blocks = st_read('data/Quesnel_thinning/12l_12n_bdy.geojson')
 thinning_block_ids = blocks$BLOCKNUM #get ids of thinning blocks
 
 block_ids = blocks$BLOCKNUM
+names(block_ids) = block_ids #name vector so that lists have names of ids when you iterate over them
 
 #load harvest dates
-harvest_dates_file = 'data/Quesnel_thinning/harvest_dates.csv'
+harvest_dates_file = 'data/Quesnel_thinning/harvest_dates_plus.csv'
 harvest_dates_df = read_csv(harvest_dates_file)
 
 if(!file.exists('data/Quesnel_thinning/harvest_dates_plus.csv')){
@@ -54,7 +56,7 @@ if(!file.exists('data/Quesnel_thinning/harvest_dates_plus.csv')){
 }
 
 #load Otsu thresholds
-otsu_df = read_csv("data/Quesnel_thinning/Otsu_change_thresholds.csv")
+# otsu_df = read_csv("data/Quesnel_thinning/Otsu_change_thresholds.csv")
 
 #load LiDAR data
 lidar_dir = 'data/Quesnel_thinning/chm_change_scenes'
@@ -123,6 +125,9 @@ if(terra::crs(vect(blocks)) != terra::crs(rast(raw_rasters[1]))){ #reproject blo
 blocks_wrapped = blocks |> vect() |> wrap()
 
 scale_factor = 10000 #what the reflectance values get divided by to facilitate calculating indices and softmax values
+
+#define growing season months (May through October)
+gs_months = c(5:10)
 
 #create directories for each type of dataset to store the processed rasters
 nonnorm_string = 'Non-normalized'
@@ -404,6 +409,15 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
     vect()|>
     project(target_crs)
   
+  #define function for helping make template spatrasters
+  snap_extent <- function(ext, res) {
+    xmin <- floor(ext[1] / res) * res
+    xmax <- ceiling(ext[2] / res) * res
+    ymin <- floor(ext[3] / res) * res
+    ymax <- ceiling(ext[4] / res) * res
+    ext(xmin, xmax, ymin, ymax)
+  }
+  
   res_dirs = paste0(dirs, '_',target_res,'m')
   
   #check if 
@@ -411,14 +425,6 @@ if(length(list.files(dirs,recursive = T,pattern='\\.tif$')) < length(dirs)*lengt
     
     #make template raster for resampling scenes
     aoi_ext = ext(vect(blocks) |> project(target_crs))
-    
-    snap_extent <- function(ext, res) {
-      xmin <- floor(ext[1] / res) * res
-      xmax <- ceiling(ext[2] / res) * res
-      ymin <- floor(ext[3] / res) * res
-      ymax <- ceiling(ext[4] / res) * res
-      ext(xmin, xmax, ymin, ymax)
-    }
     
     aoi_ext_snapped <- snap_extent(aoi_ext, target_res)
     

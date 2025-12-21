@@ -32,9 +32,7 @@ library(sf)
 # canada <- ne_countries(country = "canada", returnclass = "sf", scale = "large")
 
 # Download 10m resolution (highest available) admin boundaries
-provinces_hires <- ne_download(scale = "large", 
-                               type = "admin_1_states_provinces", 
-                               category = "cultural") %>%
+provinces_hires <- ne_states('canada')|>
   filter(admin == "Canada") |>
   filter(name == 'British Columbia')
 
@@ -56,7 +54,7 @@ canada <- list(
 
 # Convert your AOI to sf
 aoi_sf <- st_as_sf(aoi) |> st_centroid()
-aoi_sf$label = 'Study site location'
+aoi_sf$label = 'Study site'
 
 # Create a buffer around your AOI
 aoi_buffer <- st_buffer(aoi_sf, dist = 450000)  # 100km buffer for detailed map
@@ -120,12 +118,12 @@ detailed_map <- ggplot() +
   # coord_sf(xlim = c(bbox[1], bbox[3]), ylim = c(bbox[2], bbox[4])) +
   # labs(title = "Detailed Study Area Location near Quesnel, BC") +
   theme_void()+
-  labs(title = 'A')+
+  # labs(title = 'A')+
   theme(
     axis.title.x = element_blank(),
     axis.title.y = element_blank()
   )
-detailed_map
+# detailed_map
 
 
 
@@ -151,7 +149,7 @@ ps2021_p = ggplot()+
                       ,max_col_value = 300
                       ) +
   blockplot +
-  labs(title='B', subtitle =  str_remove(basename(ps_2021_scene_file), "_3B.*"))
+  labs(title='A', subtitle =  str_remove(basename(ps_2021_scene_file), "_3B.*"))
 # ps2021_p
 
 ps_2024_scene_file = ps_raw_scenes_list[828]
@@ -173,6 +171,20 @@ ps2021_p+ps2024_p+plot_layout(guides = 'collect',nrow=2)
 
 library(patchwork)
 (detailed_map+theme(plot.background = element_rect(color = "black", fill = NA, size = 1))) + (ps2021_p+theme(plot.background = element_rect(color = "black", fill = NA, size = 1)))
+
+#----both PlanetScope scenes next to location
+# (detailed_map+theme(plot.background = element_rect(color = "black", fill = NA, size = 1))) +
+#   (ps2021_p+ps2024_p+plot_layout(guides = 'collect',nrow=2))
+
+# (detailed_map #+ theme(plot.background = element_rect(color = "black", fill = NA, size = 1))
+#   # +annotate("text", x = Inf, y = Inf, label = "A", hjust = 8, vjust = 0.75, size = 5)
+#   ) +
+  (
+    (ps2021_p+labs(title = 'B', subtitle= str_remove(basename(ps_2021_scene_file), "_3B.*"))) 
+   + (ps2024_p+labs(title = 'C', subtitle= str_remove(basename(ps_2024_scene_file), "_3B.*"))) 
+   + plot_layout(guides = 'collect', ncol = 2)
+   ) 
+# +plot_layout(widths = c(2/3, 1))
 
 
 #----gifs----

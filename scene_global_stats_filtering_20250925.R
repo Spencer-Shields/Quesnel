@@ -23,6 +23,7 @@ data_string = paste0('Stats_percentiles_logAUC_JMD_FDR_HarvestThreshold=',harves
 data_filename = paste0(ps_dir,'/',data_string,'.arrow')
 
 #run if summary data file does not exist
+print('Checking if summary stats file exists')
 if(!file.exists(data_filename)){
   
   #----set up for processing----
@@ -374,6 +375,7 @@ if(!file.exists(data_filename)){
 
 
 #----load stats table, clean and process dataframe----
+print('Loading and cleaning summary stats')
 
 results_df_load = read_feather(data_filename)
 
@@ -402,38 +404,18 @@ results_df_ = results_df_load |>
     str_detect(dataset, 'Z') ~ 'Z',
     TRUE ~ dataset  # keep original value if no match
   )) |>
-  filter(var_name != 'WDVI') #remove WDVI since it's exactly the same as DVI
+  filter(!var_name %in% c('WDVI','CI','NDWI','RVI','TTVI', 'VARIgreen')) #indices to remove
 
 #remove scenes that should have been removed during previous steps
 results_df = results_df_ |> na.omit()
 
-#make dataframe that only has the results from the tests (i.e. remove unnecessary rows)
-test_results_df = results_df |> 
-  filter(block_pixel_stratum == 'Total') |> dplyr:: select(-block_pixel_stratum)
-
-
-#see how many scenes are in each dataset
-results_df |> group_by(dataset
-                       # , block_id
-                       # , var_name
-) |> 
-  summarise(n = n()) #|>
+# #see how many scenes are in each dataset
+# results_df |> group_by(dataset
+#                        # , block_id
+#                        # , var_name
+# ) |> 
+#   summarise(n = n()) #|>
 # arrange(block_id)
-
-#get ids of scenes which appear in Non-normalized but not other datasets
-d = unique(results_df$dataset)
-
-nn = results_df |> filter(str_detect(dataset, 'Non-normalized')
-                          ,var_name=='blue'
-                          ,block_id==''
-)
-
-missing_scenes = pblapply(d[-str_detect(d,'Non-normalized')], function(x){
-  r_filt = results_df |> filter(dataset == x) |> as.data.frame()
-  missing = r_filt[!nn$id %in% r_filt$id,]
-  
-})
-
 
 #----join metadata table with results----
 
@@ -491,36 +473,69 @@ hq_scenes_df = results_meta_df |>
               , names_from = var_name, values_from = valid_proportion) |>
   na.omit()
 
-#get ids of high quality scenes that are common to each dataset, subset results to only include these common high-quality IDs
-ds_ids = sapply(unique(hq_scenes_df$dataset), function(d)hq_scenes_df$id[hq_scenes_df$dataset==d])
-common_ids = Reduce(intersect, ds_ids)
+# get ids of high quality scenes that are common to each dataset, subset results to only include these common high-quality IDs
+# ds_ids = sapply(unique(hq_scenes_df$dataset), function(d)hq_scenes_df$id[hq_scenes_df$dataset==d])
+# common_ids = Reduce(intersect, ds_ids)
 
-results_meta_df = results_meta_df |> filter(id %in% common_ids)
+results_meta_df = results_meta_df |>
+  semi_join(hq_scenes_df |> select(id, dataset, block_id, acquisition_date),
+            by = c("id", "dataset", "block_id", "acquisition_date"))
+
+
 
 cat('Final dataframe with valid scenes: results_meta_df')
 
-# #tally scenes per block
-# hq_scenes_byblock_sum = results_meta_df |>
-#   filter(block_pixel_stratum=='Total',
-#          var_name=='blue',
-#          dataset=='Z') |>
-#   group_by(block_id) |>
-#   summarise(n = n())
-# 
-# #tally how many dates there are in each month and day for each block 
-# hq_scenes_permonth_summ = results_meta_df |>
-#   mutate(year_mon = format(acquisition_date, "%Y-%m")) |>
-#   group_by(dataset, block_id, year_mon) |>
-#   summarise(count = n()) |>
-#   mutate(acquisition_month = as.numeric(str_remove_all(year_mon, '.*-')))
-# 
-# jan_june_labels <- hq_scenes_permonth_summ$year_mon[hq_scenes_permonth_summ$acquisition_month %in% c(1, 6)]
-# 
-# ggplot(hq_scenes_permonth_summ |> filter(str_detect(dataset, 'SM'))
-#        , aes(x = year_mon, y = count))+
-#   geom_point()+
-#   # geom_line()+
-#   facet_grid(rows=vars(block_id)
-#              # , cols = vars(block_id)
-#   )+
-#   scale_x_discrete(breaks = jan_june_labels)
+#tally scenes per block
+hq_scenes_byblock_sum = results_meta_df |>
+  filter(block_pixel_stratum=='Total',
+         var_name=='blue',
+         dataset=='Z') |>
+  group_by(block_id) |>
+  summarise(n = n())
+
+#tally how many dates there are in each month and day for each block
+hq_scenes_permonth_summ = results_meta_df |>
+  mutate(year_mon = format(acquisition_date, "%Y-%m")) |>
+  group_by(dataset, block_id, year_mon) |>
+  summarise(count = n()) |>
+  mutate(acquisition_month = as.numeric(str_remove_all(year_mon, '.*-')))
+
+jan_june_labels <- hq_scenes_permonth_summ$year_mon[hq_scenes_permonth_summ$acquisition_month %in% c(1, 6)]
+
+ggplot(hq_scenes_permonth_summ |> filter(str_detect(dataset, 'SM'))
+       , aes(x = year_mon, y = count))+
+  geom_point()+
+  # geom_line()+
+  facet_grid(rows=vars(block_id)
+             # , cols = vars(block_id)
+  )+
+  scale_x_discrete(breaks = jan_june_labels)
+
+
+#get ids which are common to each thinning block
+ds_ids = sapply(unique(results_meta_df$dataset), function(d)results_meta_df$id[results_meta_df$dataset==d])
+common_ids = Reduce(intersect, ds_ids)
+
+common_ids <- results_meta_df %>%
+  group_by(block_id, dataset) %>%
+  summarise(ids = list(unique(id)), .groups = "drop") %>%
+  summarise(common_ids = list(Reduce(intersect, ids)), .by = block_id)
+ids_in_all_blocks <- Reduce(intersect, common_ids$common_ids)
+
+
+#----plot temporal distribution of final planetscope dataset for each block----
+
+ggplot(results_meta_df |>
+         filter(block_pixel_stratum == 'Total'
+                ,dataset == 'Z'
+                ,var_name=='blue'
+         ) |>
+         mutate(acquisition_julian = yday(acquisition_date))
+       # mutate(acquisition_year = year(acquisition_date)
+       #        ,acquisition_month = month(acquisition_date)
+       #        ,acquisition_day = day(acquisition_date)
+       #        )
+)+
+  geom_point(aes(x = acquisition_julian, y=acquisition_year), alpha=0.3)+
+  facet_grid(rows=vars(block_id))
+

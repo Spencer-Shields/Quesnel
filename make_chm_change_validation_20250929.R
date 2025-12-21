@@ -100,75 +100,75 @@ change_df = data.table::rbindlist(change_df_l)
 #run otsu on each raster
 otsu_l = pbsapply(names(change_rasts_clipped), function(x){
   d = change_df %>%
-    filter(block == x) 
+    filter(block == x)
   t = otsuThresholdCpp(values = d[['vals.Z']], bins = 256)
 })
 
 #plot otsu thresholds on density plots of change rasters
-change_df = change_df %>% 
+change_df = change_df %>%
   left_join(data.frame(block = names(otsu_l), otsu_threshold = otsu_l), by = 'block')
-
-# otsu_t = round(otsu_l[['12N_T3']],2)
-
-# #plot all
-# density_otsu_plot_0.25m=ggplot(data = change_df)+
-#   # annotate('rect', xmin=-Inf, xmax=otsu_t, ymin=-Inf, ymax = Inf,
-#   #          fill = 'lightblue', alpha = 0.3)+
-#   # annotate('text', x = -20, y = 0.16, label = 'Thinned', color = 'blue')+
-#   # annotate('rect', xmin= otsu_t, xmax = Inf, ymin=-Inf, ymax = Inf,
-#   #          fill = 'lightyellow', alpha = 0.5)+
-#   # annotate('text', x = 20, y = 0.16, label = 'Not thinned', color = 'yellow4')+
-#   geom_density(aes(x = vals.Z),fill='seagreen')+
-#   geom_vline(aes(xintercept = otsu_threshold
-#                  # , linetype = 'Otsu threshold'
-#   )
-#   ,color='darkred'
-#   )+
-#   # annotate("text", x = otsu_t+1, y = 0.16, label = paste0("Thinning threshold: ",otsu_t)
-#   #          , angle = 0, vjust = -0.5, hjust = 0, color = 'darkred')+
-#   ylab('Density')+
-#   theme_classic()+
-#   xlab("Height change (m)")+
-#   theme(legend.position = NULL)+
-#   facet_grid(vars(block))
-
-#save otsu thresholds
-otsu_tbl = tibble(
-  block_id = names(otsu_l),
-  chm_change_otsu_threshold = otsu_l
-)
-
-otsu_file = paste0(dir,'/','Otsu_change_thresholds.csv')
-if(!file.exists(otsu_file)){write_csv(otsu_tbl,otsu_file)}
+# 
+# # otsu_t = round(otsu_l[['12N_T3']],2)
+# 
+# # #plot all
+# # density_otsu_plot_0.25m=ggplot(data = change_df)+
+# #   # annotate('rect', xmin=-Inf, xmax=otsu_t, ymin=-Inf, ymax = Inf,
+# #   #          fill = 'lightblue', alpha = 0.3)+
+# #   # annotate('text', x = -20, y = 0.16, label = 'Thinned', color = 'blue')+
+# #   # annotate('rect', xmin= otsu_t, xmax = Inf, ymin=-Inf, ymax = Inf,
+# #   #          fill = 'lightyellow', alpha = 0.5)+
+# #   # annotate('text', x = 20, y = 0.16, label = 'Not thinned', color = 'yellow4')+
+# #   geom_density(aes(x = vals.Z),fill='seagreen')+
+# #   geom_vline(aes(xintercept = otsu_threshold
+# #                  # , linetype = 'Otsu threshold'
+# #   )
+# #   ,color='darkred'
+# #   )+
+# #   # annotate("text", x = otsu_t+1, y = 0.16, label = paste0("Thinning threshold: ",otsu_t)
+# #   #          , angle = 0, vjust = -0.5, hjust = 0, color = 'darkred')+
+# #   ylab('Density')+
+# #   theme_classic()+
+# #   xlab("Height change (m)")+
+# #   theme(legend.position = NULL)+
+# #   facet_grid(vars(block))
+# 
+# #save otsu thresholds
+# otsu_tbl = tibble(
+#   block_id = names(otsu_l),
+#   chm_change_otsu_threshold = otsu_l
+# )
+# 
+# otsu_file = paste0(dir,'/','Otsu_change_thresholds.csv')
+# if(!file.exists(otsu_file)){write_csv(otsu_tbl,otsu_file)}
 
 #----save change validation rasters which are cropped to the blocks, resampled and reprojected to match basemap data----
 
-#get first file from each subdirectory so that there's one planetscope raster for each thinning block
-bm_dir = 'data/planet_basemaps/global_monthly/CroppedMosaics_Indices_BlockClipped'
-bm_subdirs = list.dirs(bm_dir)
-bm_subdirs = bm_subdirs[bm_subdirs != bm_dir]
-bm_subdirs = bm_subdirs[!str_detect(bm_subdirs, 'NoChange')]
-bm_rasts = lapply(bm_subdirs, function(x){
-  fl = list.files(x, full.names = T)
-  r = rast(fl[1])
-  return(r)
-})
-bm_ids = basename(bm_subdirs)
-names(bm_rasts) = bm_ids
-
-chm_change_dir_bm = paste0(chm_change_dir, '_basemap') #make output directory
-dir.check(chm_change_dir_bm)
-
-pblapply(1:length(change_rasts_clipped), function(i){
-  n = names(change_rasts_clipped)[i]
-  filename = paste0(chm_change_dir_bm,'/',n, '.tif')
-  if(!file.exists(filename)){
-    chm = change_rasts_clipped[[n]]
-    ps = bm_rasts[[n]]
-    chm_p = project(chm, ps)
-    writeRaster(chm_p, filename)
-  }
-})
+# #get first file from each subdirectory so that there's one planetscope raster for each thinning block
+# bm_dir = 'data/planet_basemaps/global_monthly/CroppedMosaics_Indices_BlockClipped'
+# bm_subdirs = list.dirs(bm_dir)
+# bm_subdirs = bm_subdirs[bm_subdirs != bm_dir]
+# bm_subdirs = bm_subdirs[!str_detect(bm_subdirs, 'NoChange')]
+# bm_rasts = lapply(bm_subdirs, function(x){
+#   fl = list.files(x, full.names = T)
+#   r = rast(fl[1])
+#   return(r)
+# })
+# bm_ids = basename(bm_subdirs)
+# names(bm_rasts) = bm_ids
+# 
+# chm_change_dir_bm = paste0(chm_change_dir, '_basemap') #make output directory
+# dir.check(chm_change_dir_bm)
+# 
+# pblapply(1:length(change_rasts_clipped), function(i){
+#   n = names(change_rasts_clipped)[i]
+#   filename = paste0(chm_change_dir_bm,'/',n, '.tif')
+#   if(!file.exists(filename)){
+#     chm = change_rasts_clipped[[n]]
+#     ps = bm_rasts[[n]]
+#     chm_p = project(chm, ps)
+#     writeRaster(chm_p, filename)
+#   }
+# })
 
 #----save change validation rasters for blocks which are resampled to match scenes----
 
@@ -201,7 +201,8 @@ scene_subdirs = scene_subdirs[!str_detect(scene_subdirs, 'NoChange')]
 
 scene_rasts = lapply(scene_subdirs, function(x){
   fl = list.files(x, full.names = T)
-  f = fl[1]
+  fl = fl[!str_detect(fl, 'NULL')]
+  f = fl[2]
   print(f)
   r = rast(f)
   return(r)
@@ -242,10 +243,10 @@ change_scene_df = data.table::rbindlist(change_scene_df_l)
 
 #get otsu thresholds
 otsu_scene_l = pbsapply(names(chm_changes_scene), function(x){
-    d = change_scene_df %>%
-      filter(block == x) 
-    t = otsuThresholdCpp(values = d[['vals.Z']], bins = 256)
-  })
+  d = change_scene_df %>%
+    filter(block == x) 
+  t = otsuThresholdCpp(values = d[['vals.Z']], bins = 256)
+})
 
 #export otsu thresholds for planetscope data with target_resolution
 otsu_scene_tbl = tibble(
@@ -254,7 +255,7 @@ otsu_scene_tbl = tibble(
 )
 
 otsu_scene_file = paste0(dir,'/','Otsu_change_thresholds_Res=',target_res,'.csv')
-if(!file.exists(otsu_scene_file)){write_csv(otsu_tbl,otsu_scene_file)}
+if(!file.exists(otsu_scene_file)){write_csv(otsu_scene_tbl,otsu_scene_file)}
 
 #add otsu thresholds to dataframe
 change_scene_df = change_scene_df %>% 
@@ -279,7 +280,7 @@ change_scene_df = change_scene_df %>%
 #combine 0.25m and 3.76m data, make combined plot
 change_df_combined = rbind(
   change_df |> mutate(resolution = '0.25m'),
-  change_scene_df |> mutate(resolution = '3.76m')
+  change_scene_df |> mutate(resolution = '3m')
 )
 
 #remove values which are many standard deviations removed from the rest of the data to make plotting and plot generation better
@@ -296,154 +297,456 @@ rect_text_data = change_df_combined_ |>
 
 #make density plots for each block at 0.25m and planetscope scene resolution
 {
-# ggplot(data = change_df_combined_ #|>filter(resolution=='3.76m') #filter used to tune plot parameters, comment out for final plot
-#        )+
-#   #color plot area
-#   geom_rect(data = rect_text_data, aes(xmin = -Inf, xmax = otsu_threshold, ymin = -Inf, ymax = Inf, 
-#                 fill = "Thinned"), alpha = 1)+
-#   geom_rect(data = rect_text_data,  aes(xmin = otsu_threshold, xmax = Inf, ymin = -Inf, ymax = Inf, 
-#                 fill = "Not thinned"), alpha = 0.5)+
-#   scale_fill_manual(values = c("Thinned" = "lightyellow", "Not thinned" = "lightblue"),
-#                     name = NULL)+
-#   #add density plot
-#   geom_density(aes(x = vals.Z),fill='seagreen')+
-#   #add vertical line and text label for thinning threshold
-#   geom_vline(data = rect_text_data, aes(xintercept = otsu_threshold
-#                  , linetype = 'Thinning threshold'
-#   )
-#   ,color='darkred'
-#   )+
-#   scale_linetype_manual(values = c("Thinning threshold" = "solid"), 
-#                         name = NULL)+
-#   geom_text(data = rect_text_data, aes(x = otsu_threshold-2.5, label = round(otsu_threshold, 2)), 
-#             y = Inf, vjust = 1.2, hjust = 0.5, color = 'darkred', 
-#             # angle = 90, 
-#             size = 3)+
-#   ylab('Density')+
-#   theme_classic()+
-#   xlab("Height change (m)")+
-#   # theme(legend.position = NULL)+
-#   facet_grid(rows=vars(block), cols = vars(resolution))
-# 
-# pfile = 'figures/density_plots_0.25m_3.76m.png'
-# if(!file.exists(pfile)){ggsave(filename = pfile, dpi=600)}
+  ggplot(data = change_df_combined_ #|>filter(resolution=='3.76m') #filter used to tune plot parameters, comment out for final plot
+  )+
+    #color plot area
+    geom_rect(data = rect_text_data, aes(xmin = -Inf, xmax = otsu_threshold, ymin = -Inf, ymax = Inf,
+                                         fill = "Thinned"), alpha = 1)+
+    geom_rect(data = rect_text_data,  aes(xmin = otsu_threshold, xmax = Inf, ymin = -Inf, ymax = Inf,
+                                          fill = "Not thinned"), alpha = 0.5)+
+    scale_fill_manual(values = c("Thinned" = "lightyellow", "Not thinned" = "lightblue"),
+                      name = NULL)+
+    #add density plot
+    geom_density(aes(x = vals.Z),fill='seagreen')+
+    #add vertical line and text label for thinning threshold
+    geom_vline(data = rect_text_data, aes(xintercept = otsu_threshold
+                                          , linetype = 'Thinning threshold'
+    )
+    ,color='darkred'
+    )+
+    scale_linetype_manual(values = c("Thinning threshold" = "solid"),
+                          name = NULL)+
+    geom_text(data = rect_text_data, aes(x = otsu_threshold-2.5, label = round(otsu_threshold, 2)),
+              y = Inf, vjust = 1.2, hjust = 0.5, color = 'darkred',
+              # angle = 90,
+              size = 3)+
+    ylab('Density')+
+    theme_classic()+
+    xlab("Height change (m)")+
+    # theme(legend.position = NULL)+
+    facet_grid(rows=vars(block), cols = vars(resolution))
+  # 
+  # pfile = 'figures/density_plots_0.25m_3.76m.png'
+  # if(!file.exists(pfile)){ggsave(filename = pfile, dpi=600)}
   }
 
+#----compare Otsu thresholds with thinning thresholds based on 5m tree height----
+
+# #apply to 3m data
+{
+  #stack pre and post thinning data
+  
+  pre_post_chm_stacks = pblapply(block_ids, function(b){
+    
+    #get chm data
+    pre = pre_rasts_l[[b]]
+    post = post_rasts_l[[b]]
+    
+    #get ps scene for cropping/geometry
+    scene = scene_rasts[[b]]
+    
+    r = lapply(list(pre, post), function(p){
+      #reproject to match scene
+      pp = project(p, scene)
+      
+      #crop to scene
+      ppc = crop(pp, scene[[1]], mask=T)
+      
+      return(ppc)
+    }) |> rast()
+    names(r) = c('pre', 'post')
+    return(r)
+  })
+  names(pre_post_chm_stacks) = block_ids
+  #   
+  #   
+  #   #make thinning validation layers using 5m height definition
+  #   thinning_masks_5m = pblapply(pre_post_chm_stacks, function(r){
+  #     
+  #     mpre = ifel(r[['pre']] >= 5, 1, 0)
+  #     mpost = ifel(r[['post']] < 5, 1, 0)
+  #     
+  #     m = mpre & mpost
+  #     return(m)
+  #   })
+  #   
+  #   thinning_masks_combined = thinning_masks_5m |> sprc()
+  #   names(thinning_masks_combined) = names(thinning_masks_5m)
+  #   
+  #make thinning validation layers by applying otsu segmentation to the change raster
+  otsu_thresh = pbsapply(pre_post_chm_stacks, function(r){
+    rc = r$post - r$pre
+    o = values(rc, na.rm=T) |>
+      otsuThresholdCpp(bins=256)
+    return(o)
+  })
+  
+  thinnings_masks_otsu_3m = pblapply(block_ids, function(b){
+    r = pre_post_chm_stacks[[b]]
+    o = otsu_thresh[[b]]
+    rc = r$post - r$pre
+    
+    m = ifel(rc <= o ,1,0)
+    return(m)
+  })
+  names(thinnings_masks_otsu_3m) = block_ids
+}
+
+#apply to 0.25m data then resample to 3m
+{
+  #stack pre and post thinning data
+  pre_post_chm_stacks_0.25 = pblapply(block_ids, function(b){
+    
+    cat('\r',b)
+    #get chm data
+    pre = pre_rasts_l[[b]]
+    post = post_rasts_l[[b]]
+    
+    crs(post) = crs(pre)
+    
+    post = extend(post,pre)
+    pre = extend(pre,post)
+    
+    #get block for cropping/geometry
+    block = blocks[blocks$BLOCKNUM==b,]
+    
+    r = lapply(list(pre, post), function(p){
+      #reproject to match scene
+      # pp = project(p, scene)
+      
+      #crop to scene
+      ppc = crop(p, block, mask=T)
+      
+      return(ppc)
+    }) |> rast()
+    names(r) = c('pre', 'post')
+    return(r)
+  })
+  names(pre_post_chm_stacks_0.25) = block_ids
+  
+  
+  #make thinning validation layers using 5m height definition
+  thinning_masks_5m = pblapply(pre_post_chm_stacks_0.25, function(r){
+    
+    mpre = ifel(r[['pre']] >= 5, 1, 0)
+    mpost = ifel(r[['post']] < 5, 1, 0)
+    
+    m = mpre & mpost
+    return(m)
+  })
+  
+  #make thinning validation layers by applying otsu segmentation to the change raster
+  otsu_thresh_0.25 = pbsapply(pre_post_chm_stacks_0.25, function(r){
+    rc = r$post - r$pre
+    o = values(rc, na.rm=T) |>
+      otsuThresholdCpp(bins=256)
+    return(o)
+  })
+  
+  thinnings_masks_otsu = pblapply(block_ids, function(b){
+    r = pre_post_chm_stacks_0.25[[b]]
+    o = otsu_thresh_0.25[[b]]
+    rc = r$post - r$pre
+    
+    m = ifel(rc <= o ,1,0)
+    return(m)
+  })
+  names(thinnings_masks_otsu) = block_ids
+  
+  #stack otsu with 5m for comparison
+  otsu_5m_stacks = pblapply(block_ids, function(b){
+    r = c(thinning_masks_5m[[b]], thinnings_masks_otsu[[b]])
+    names(r)=c('5m', 'otsu')
+    return(r)
+  })
+  names(otsu_5m_stacks) = block_ids
+  
+  #generate contingency tables for ots vs 5m rasters
+  ct_l = pblapply(otsu_5m_stacks, crosstab)
+  names(ct_l) = names(otsu_5m_stacks)
+  
+  #get overall agreement for the two datasets at 0.25m
+  oa_0.25 = lapply(block_ids, function(b){
+    ct = ct_l[[b]]
+    tibble(
+      oa = (ct[1,1]+ct[2,2])/sum(ct),
+      block_id = b)
+  }) |> bind_rows()
+  
+  #resample to 3m
+  otsu_5m_stacks_3 = pblapply(block_ids, function(b){project(otsu_5m_stacks[[b]], scene_rasts[[b]])})
+  names(otsu_5m_stacks_3) = block_ids
+  
+  #generate overall agreement for the two datasets at 3m
+  oa_3 = pblapply(block_ids, function(b){
+    ct = crosstab(otsu_5m_stacks_3[[b]])
+    tibble(
+      oa = (ct[1,1]+ct[2,2])/sum(ct),
+      block_id = b)
+  }) |> bind_rows()
+  
+  #Result: 98% =< agreement between Otsu and 5m-rule for 0.25m CHMs, 99% =< agreement when CHMs are resampled to 3m
+}
+
+#----compare Otsu thresholds for resampled Liam data versus z_p95 data----
+source('derive lidar metrics_202501020.R')
+
+#load metric change data
+
+z_mets = c('z_p95', 'z_max', 'z_mean', 'z_p75')
+
+lmcfl = list.files(lid_mets_change_cropped_dir, full.names = T)
+lid_mets_change_l = lapply(block_ids, function(b){
+  f = lmcfl[str_detect(lmcfl,b)]
+  r = rast(f, lyrs = z_mets)
+})
+names(lid_mets_change_l) = block_ids
+
+#for each change metric and each block, get otsu thresholds
+lid_met_otsu_tbl = pblapply(z_mets, function(m){
+  bdf = lapply(block_ids, function(b){
+    rc = lid_mets_change_l[[b]][[m]]
+    o = values(rc, na.rm=T) |>
+      otsuThresholdCpp(bins=256)
+    tbl = tibble(lid_met = m,
+                 block_id = b,
+                 otsu_thresh = o)
+    return(tbl)
+  }) |> bind_rows()
+  return(bdf)
+}) |> bind_rows()
+
+#add the thresholds from the resampled data
+lid_met_otsu_tbl = rbind(lid_met_otsu_tbl,
+                         tibble(lid_met = 'liam_resampled',
+                                block_id = names(otsu_thresh),
+                                otsu_thresh))
+lid_met_otsu_tbl_wide = lid_met_otsu_tbl |>
+  pivot_wider(names_from = 'lid_met', values_from = 'otsu_thresh')
+
+#generate rasters using otsu thresholds for each lidar metric and thinning block
+lid_mets_otsu_rasts = pblapply(z_mets, function(m){
+  bl = pblapply(block_ids, function(b){
+    rc = lid_mets_change_l[[b]][[m]]
+    o = lid_met_otsu_tbl_wide[[m]][lid_met_otsu_tbl_wide$block_id==b]
+    m = ifel(rc <= o ,1,0)
+  })
+  names(bl) = block_ids
+  return(bl)
+})
+names(lid_mets_otsu_rasts) = z_mets
+
+#get contingency tables for each block and metric with the liam resampled data
+cont_tbl = lapply(z_mets, function(m){
+  l = lid_mets_otsu_rasts[[m]]
+  bdf = lapply(block_ids, function(b){
+    cat('\r',b)
+    r_met = l[[b]]
+    r_resamp = thinnings_masks_otsu_3m[[b]]
+    
+    r_met = extend(r_met, r_resamp)
+    r_resamp = extend(r_resamp, r_met)
+    
+    r = c(r_met, r_resamp)
+    names(r) = c('met', 'liam')
+    
+    #contingency table
+    ct = crosstab(r)
+    
+    #overall agreement
+    tibble(
+      oa = (ct[1,1]+ct[2,2])/sum(ct),
+      block_id = b)
+  }) |> 
+    bind_rows() |>
+    mutate(lid_met = m)
+  return(bdf)
+})|> bind_rows() |>
+  pivot_wider(names_from = 'lid_met', values_from = 'oa')
+
+#try 5m rule-based
+{
+  lmprefl = list.files(lid_mets_pre_cropped_dir, full.names = T)  
+  lmpostfl = list.files(lid_mets_post_dec_cropped_dir, full.names = T)
+  
+  names(z_mets) = z_mets
+  
+  lid_mets_5m_rasts = pblapply(z_mets, function(m){
+    bl = pblapply(block_ids, function(b){
+      pre_f = lmprefl[str_detect(lmprefl,b)]
+      pre_r = rast(pre_f, lyrs=m)
+      post_f = lmpostfl[str_detect(lmpostfl,b)]
+      post_r = rast(post_f,lyrs=m)
+      
+      pre_r = extend(pre_r, post_r)
+      post_r = extend(post_r, pre_r)
+      
+      pre_r_log = ifel(pre_r>=5,1,0)
+      post_r_log = ifel(post_r<5,1,0)
+      
+      r = pre_r_log & post_r_log
+      return(r)
+    })
+    names(bl) = block_ids
+    return(bl)
+  })
+  names(lid_mets_5m_rasts) = z_mets
+  }
+
+#get contingency tables for each block and metric with the liam resampled data
+cont_tbl_5m = lapply(z_mets, function(m){
+  l = lid_mets_5m_rasts[[m]]
+  bdf = lapply(block_ids, function(b){
+    cat('\r',b)
+    r_met = l[[b]]
+    r_resamp = thinnings_masks_otsu_3m[[b]]
+    
+    r_met = extend(r_met, r_resamp)
+    r_resamp = extend(r_resamp, r_met)
+    
+    r = c(r_met, r_resamp)
+    names(r) = c('met', 'liam')
+    
+    #contingency table
+    ct = crosstab(r)
+    
+    #overall agreement
+    tibble(
+      oa = (ct[1,1]+ct[2,2])/sum(ct),
+      block_id = b)
+  }) |> 
+    bind_rows() |>
+    mutate(lid_met = m)
+  return(bdf)
+})|> bind_rows() |>
+  pivot_wider(names_from = 'lid_met', values_from = 'oa')
+cont_tbl_5m
+
+#load lidar metric change data
+lmc_l = lapply(z_mets, function(m){
+  bl = lapply(block_ids, function(b){
+    r = lid_mets_change_l[[b]]
+    rm = r[[m]]
+    return(rm)
+  })
+  names(bl) = block_ids
+  return(bl)
+})
 
 #----make road and non-vegetated ground mask----
 
-blocks_scene_p = project(blocks, crs(scene_rasts[[1]])) #reproject blocks to match scene crs
-blocks_bm_p = project(blocks, crs(bm_rasts[[1]]))
-
-pre_threshold = 0.5
-post_threshold = 0.3
-change_threshold = 0.1
-
+# blocks_scene_p = project(blocks, crs(scene_rasts[[1]])) #reproject blocks to match scene crs
+# blocks_bm_p = project(blocks, crs(bm_rasts[[1]]))
+# 
+# pre_threshold = 0.5
+# post_threshold = 0.3
+# change_threshold = 0.1
+# 
 #combine scene rasters
-combined_lid_rasts_l = pblapply(blocks_, function(x){
-  
-  block = blocks_scene_p[blocks_p$BLOCKNUM==x,]
-  # scene = scene_rasts[[x]]
-  
-  # print(paste('Processing', block$BLOCKNUM,'combining and cropping lidar rasters'))
-  pre = pre_rasts_l[[x]]
-  post = post_rasts_l[[x]]
-  change = change_rasts_l[[x]]
-  
-  pl = list(pre,post,change)
-  names(pl) = c('pre','post','change')
-  
-  #align rasters and project to match blocks
-  r_l = lapply(names(pl), function(y){
-    r = project(pl[[y]], crs(block))
-    # print(paste('Projected',y))
-    r = crop(r,block,mask=T)
-    # print(paste('Cropped',y))
-    return(r)
-  })
-  names(r_l) = names(pl)
-  
-  r_l[['post']] = resample(r_l[['post']], r_l[['change']])
-  # print(paste('Resample post'))
-  r_l[['pre']] = resample(r_l[['pre']], r_l[['change']])
-  # print(paste('Resample pre'))
-  
-  c_r = rast(r_l)
-  # print(paste('Created combined raster'))
-  
-  names(c_r) = c('pre', 'post', 'change')
-  return(c_r)
-})
-names(combined_lid_rasts_l) = blocks_
-
-combined_lid_dir = paste0(dir,'/chm_combined_cropped') #save
-dir.check(combined_lid_dir)
-pblapply(names(combined_lid_rasts_l), function(n){
-  filename=paste0(combined_lid_dir,'/',n,'.tif')
-  if(!file.exists(filename)){
-    writeRaster(combined_lid_rasts_l[[n]],filename)
-  }
-})
-
-#make masks for scenes
-nonveg_masks_l = pblapply(combined_lid_rasts_l, function(r){
-  m = ifel(r[['pre']] < pre_threshold & r[['post']] < post_threshold
-           ,NA
-           ,1)
-  return(m)
-})
-names(nonveg_masks_l) = blocks_
-# list_plot(scene_nonveg_masks_l)
-
-nonveg_mask_dir = paste0(dir,'/nonveg_mask_pre=',pre_threshold,'_post=',post_threshold) #save masks
-dir.check(nonveg_mask_dir)
-pblapply(names(nonveg_masks_l), function(n){
-  filename=paste0(nonveg_mask_dir,'/',n,'.tif')
-  if(!file.exists(filename)){
-    writeRaster(nonveg_masks_l[[n]],filename)
-  }
-})
-
-#resample to match scene resolution
-resample_mask = pblapply(blocks_, function(x){
-  scene = scene_rasts[[x]]
-  m = scene_nonveg_masks_l[[x]]
-  
-  mrs = resample(m, scene)
-  return(mrs)
-})
+# combined_lid_rasts_l = pblapply(blocks_, function(x){
+# 
+#   block = blocks_scene_p[blocks_p$BLOCKNUM==x,]
+#   # scene = scene_rasts[[x]]
+# 
+#   # print(paste('Processing', block$BLOCKNUM,'combining and cropping lidar rasters'))
+#   pre = pre_rasts_l[[x]]
+#   post = post_rasts_l[[x]]
+#   change = change_rasts_l[[x]]
+# 
+#   pl = list(pre,post,change)
+#   names(pl) = c('pre','post','change')
+# 
+#   #align rasters and project to match blocks
+#   r_l = lapply(names(pl), function(y){
+#     r = project(pl[[y]], crs(block))
+#     # print(paste('Projected',y))
+#     r = crop(r,block,mask=T)
+#     # print(paste('Cropped',y))
+#     return(r)
+#   })
+#   names(r_l) = names(pl)
+# 
+#   r_l[['post']] = resample(r_l[['post']], r_l[['change']])
+#   # print(paste('Resample post'))
+#   r_l[['pre']] = resample(r_l[['pre']], r_l[['change']])
+#   # print(paste('Resample pre'))
+# 
+#   c_r = rast(r_l)
+#   # print(paste('Created combined raster'))
+# 
+#   names(c_r) = c('pre', 'post', 'change')
+#   return(c_r)
+# })
+# names(combined_lid_rasts_l) = blocks_
+# 
+# combined_lid_dir = paste0(dir,'/chm_combined_cropped') #save
+# dir.check(combined_lid_dir)
+# pblapply(names(combined_lid_rasts_l), function(n){
+#   filename=paste0(combined_lid_dir,'/',n,'.tif')
+#   if(!file.exists(filename)){
+#     writeRaster(combined_lid_rasts_l[[n]],filename)
+#   }
+# })
+# 
+# #make masks for scenes
+# nonveg_masks_l = pblapply(combined_lid_rasts_l, function(r){
+#   m = ifel(r[['pre']] < pre_threshold & r[['post']] < post_threshold
+#            ,NA
+#            ,1)
+#   return(m)
+# })
+# names(nonveg_masks_l) = blocks_
+# # list_plot(scene_nonveg_masks_l)
+# 
+# nonveg_mask_dir = paste0(dir,'/nonveg_mask_pre=',pre_threshold,'_post=',post_threshold) #save masks
+# dir.check(nonveg_mask_dir)
+# pblapply(names(nonveg_masks_l), function(n){
+#   filename=paste0(nonveg_mask_dir,'/',n,'.tif')
+#   if(!file.exists(filename)){
+#     writeRaster(nonveg_masks_l[[n]],filename)
+#   }
+# })
+# 
+# #resample to match scene resolution
+# resample_mask = pblapply(blocks_, function(x){
+#   scene = scene_rasts[[x]]
+#   m = scene_nonveg_masks_l[[x]]
+#   
+#   mrs = resample(m, scene)
+#   return(mrs)
+# })
 
 #----make map of chm and PS data----
 
-library(tmap)
-library(tidyterra)
-
-#load combined lidar data
-combined_lid_files = list.files(combined_lid_dir, full.names=T)
-
-blocks_v = vect(blocks)
-block_12nt3 = blocks_v[blocks_v$BLOCKNUM=='12N_T3']
-
-bs = '12N_T3'
-
-
-combined_lid_files = list.files(combined_lid_dir, full.names=T)
-
-comb_lid_12nt3 = rast(combined_lid_files[str_detect(combined_lid_files,bs)])
-
-names(comb_lid_12nt3) = c('July 2021 canopy height', 'October 2024 canopy height', 'Height change')
-
-ggplot()+
-  geom_spatraster(data = comb_lid_12nt3)+
-  facet_wrap(~lyr)+
-  scale_fill_viridis_c(option='viridis', na.value = 'white', name = 'Value')+
-  theme_classic()+
-  # coord_equal(expand = FALSE) +
-  theme(
-    axis.title = element_blank(),
-    axis.text = element_blank(),
-    axis.ticks = element_blank()
-  )
+# library(tmap)
+# library(tidyterra)
+# 
+# #load combined lidar data
+# combined_lid_files = list.files(combined_lid_dir, full.names=T)
+# 
+# blocks_v = vect(blocks)
+# block_12nt3 = blocks_v[blocks_v$BLOCKNUM=='12N_T3']
+# 
+# bs = '12N_T3'
+# 
+# 
+# combined_lid_files = list.files(combined_lid_dir, full.names=T)
+# 
+# comb_lid_12nt3 = rast(combined_lid_files[str_detect(combined_lid_files,bs)])
+# 
+# names(comb_lid_12nt3) = c('July 2021 canopy height', 'October 2024 canopy height', 'Height change')
+# 
+# ggplot()+
+#   geom_spatraster(data = comb_lid_12nt3)+
+#   facet_wrap(~lyr)+
+#   scale_fill_viridis_c(option='viridis', na.value = 'white', name = 'Value')+
+#   theme_classic()+
+#   # coord_equal(expand = FALSE) +
+#   theme(
+#     axis.title = element_blank(),
+#     axis.text = element_blank(),
+#     axis.ticks = element_blank()
+#   )
 
 # scene_nonveg_mask_dir = paste0(dir,'/nonveg_mask_scene_pre=',pre_threshold,'_post=',post_threshold)
 # dir.check(scene_lid_dir)
