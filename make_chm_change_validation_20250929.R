@@ -1,7 +1,5 @@
 source('scene_setup_preprocessing_20250909.R')
 library(data.table)
-# library(supercells)
-# library(dbscan)
 
 #----Load data----
 dir = 'data/Quesnel_thinning'
@@ -358,21 +356,21 @@ rect_text_data = change_df_combined_ |>
     return(r)
   })
   names(pre_post_chm_stacks) = block_ids
-  #   
-  #   
-  #   #make thinning validation layers using 5m height definition
-  #   thinning_masks_5m = pblapply(pre_post_chm_stacks, function(r){
-  #     
-  #     mpre = ifel(r[['pre']] >= 5, 1, 0)
-  #     mpost = ifel(r[['post']] < 5, 1, 0)
-  #     
-  #     m = mpre & mpost
-  #     return(m)
-  #   })
-  #   
-  #   thinning_masks_combined = thinning_masks_5m |> sprc()
-  #   names(thinning_masks_combined) = names(thinning_masks_5m)
-  #   
+
+
+    #make thinning validation layers using 5m height definition
+    thinning_masks_5m = pblapply(pre_post_chm_stacks, function(r){
+
+      mpre = ifel(r[['pre']] >= 5, 1, 0)
+      mpost = ifel(r[['post']] < 5, 1, 0)
+
+      m = mpre & mpost
+      return(m)
+    })
+
+    thinning_masks_combined = thinning_masks_5m |> sprc()
+    names(thinning_masks_combined) = names(thinning_masks_5m)
+
   #make thinning validation layers by applying otsu segmentation to the change raster
   otsu_thresh = pbsapply(pre_post_chm_stacks, function(r){
     rc = r$post - r$pre

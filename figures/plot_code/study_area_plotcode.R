@@ -126,7 +126,19 @@ detailed_map <- ggplot() +
 # detailed_map
 
 
+#make scale bar to add to plots
+library(ggspatial)
 
+scalebar_layer =
+  annotation_scale(
+    location = "bl",
+    width_hint = 0.25,
+    height = unit(0.15, "cm"),
+    text_cex = 0.6,
+    pad_x = unit(0.2, "cm"),
+    pad_y = unit(0.05, "cm"), #distance from bottom of panel
+    line_width = 0.5
+  )
 
 
 
@@ -161,8 +173,10 @@ ps2024_p = ggplot()+
                       ,max_col_value = 300
   ) +
   blockplot +
-  labs(title = 'B', subtitle= str_remove(basename(ps_2024_scene_file), "_3B.*"))
-# ps2024_p
+  labs(
+    # title = 'B', 
+    subtitle= str_remove(basename(ps_2024_scene_file), "_3B.*"))
+
 
 library(patchwork)
 ps2021_p+ps2024_p+plot_layout(guides = 'collect',nrow=2)
@@ -182,14 +196,34 @@ library(patchwork)
   (
     (ps2021_p+labs(title = 'B', subtitle= str_remove(basename(ps_2021_scene_file), "_3B.*"))) 
    + (ps2024_p+labs(title = 'C', subtitle= str_remove(basename(ps_2024_scene_file), "_3B.*"))) 
-   + plot_layout(guides = 'collect', ncol = 2)
+   + plot_layout(guides = 'collect', nrow = 2)
    ) 
 # +plot_layout(widths = c(2/3, 1))
 
 
-#----gifs----
-{
-#----make raster stack for non-normalized, z_normalized, and zrobust
+ps2024_p_reproj = ggplot()+
+  geom_spatraster_rgb(data = ps_2024_scene |> project('EPSG:32610')
+                      , r = 6, g = 4, b = 2
+                      , stretch = 'lin'
+                      ,max_col_value = 300
+  ) +
+  blockplot +
+  labs(title = 'B', subtitle= str_remove(basename(ps_2024_scene_file), "_3B.*"))
+
+
+
+# #rotate scene so that it's square
+# library(stars)
+# 
+# ps_2024_scene_rot = ps_2024_scene |>
+#   st_as_stars() |>
+#   st_rotate(angle = 8) 
   
+#----for slides----
+
+{
+  ps2024_p 
+  # +
+  #   labs(subtitle = NULL)
   
 }

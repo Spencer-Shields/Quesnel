@@ -7,7 +7,7 @@ library(magick)
 
 #set parameters
 feat = 'NDVI'
-block = '12N_1X1W'
+block = '12N_T3'
 datasets = c('NN', 'SM', 'Z', 'Zr')
 
 #set up data
@@ -18,10 +18,10 @@ datasets = c('NN', 'SM', 'Z', 'Zr')
   
   datasets_to_plot = datasets
   
-  subset_df = results_meta_df |>
+  subset_df_ = results_meta_df |>
     filter(
-      block_pixel_stratum == 'Total'
-      ,var_name %in% feats_to_plot
+      # block_pixel_stratum == 'Total',
+      var_name %in% feats_to_plot
       ,block_id %in% blocks_to_plot
       # ,id %in% ids_in_all_blocks
     ) |>
@@ -48,6 +48,10 @@ gif_dir = file.path('figures','gifs')
 dir.check(gif_dir)
 
 #----raster time series gifs----
+
+subset_df = subset_df_ |> 
+  filter(block_pixel_stratum == 'Total') |>
+  select(acquired, month)
 
 #individual rasters, full time series
 {
@@ -139,68 +143,120 @@ dir.check(gif_dir)
   })
 }
 
+#reload growing season raster gifs as magick objects
+rast_l_magick = lapply(rast_gif_files_gs, image_read)
+names(rast_l_magick) = datasets
 
 #----scatter plot time series gifs----
 
-#individual plots, full time series
+subset_df = subset_df_ |> 
+  filter(block_pixel_stratum != 'Total') |>
+  mutate(acquired = as.POSIXct(acquired))
+
+#raster parameters to set plot dimensions
+ii = image_info(rast_l_magick[[1]])
+rwidth = unique(ii$width)
+rheight = unique(ii$height)*(2/3)
+
 pixel_strata_color_map = c('Not thinned' = "#00BFC4", 'Thinned' = "#F8766D")
+
+#growing season plot
 {
-  pix_plot_full = ggplot(subset_df)+
-    #show 5th to 95th percentiles for pixel strata
-    # geom_ribbon(aes(x = acquired, ymin = X5., ymax = X95., fill = block_pixel_stratum, colour = block_pixel_stratum), alpha = 0.1)+
-    #show interquartile range of pixel strata
-    geom_ribbon(aes(x = acquired, ymin = X25., ymax = X75., fill = block_pixel_stratum, color=block_pixel_stratum), alpha = 0.3)+
-    #show median pixel values for the different strata
-    geom_point(aes(x = acquired, y = median, color=block_pixel_stratum),alpha=0.3)+
-    #format pixel strata
-    # Custom colors and legend title
-    scale_color_manual(
-      name = "Pixel stratum"
-      ,values = pixel_strata_color_map
+  
+  scat_plot_l_gs = pblapply(unique(subset_df$dataset), function(d){
+    
+    # 1. Build the static base plot (no transition)
+    static_base <- ggplot(
+      subset_df |> filter(month %in% gs_months, dataset == d)
     ) +
-    scale_fill_manual(
-      name = "Pixel stratum"
-      ,values = pixel_strata_color_map
-    ) +
-    # #gaps to show only growing season
-    # scale_x_break(c(as.POSIXct('2020-11-01 00:00:00 UTC'),as.POSIXct('2021-04-30 23:59:59 UTC')))+
-    # scale_x_break(c(as.POSIXct('2021-11-01 00:00:00 UTC'),as.POSIXct('2022-04-30 23:59:59 UTC')))+
-    # scale_x_break(c(as.POSIXct('2022-11-01 00:00:00 UTC'),as.POSIXct('2023-04-30 23:59:59 UTC')))+
-    # scale_x_break(c(as.POSIXct('2023-11-01 00:00:00 UTC'),as.POSIXct('2024-04-30 23:59:59 UTC')))+
-    #format x axis date/time info
-    scale_x_datetime(
-      date_labels = "%b %Y",       # e.g., "Jan 2021"
-      date_breaks = "3 months",     # choose interval for ticks
-      limits = c(as.POSIXct('2020-01-01 00:00:00 UTC'),as.POSIXct('2024-10-31 23:59:59 UTC'))
-    )+
-    #show vertical lines for start and end of harvesting
-    geom_vline(data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id),], aes(xintercept = harvest_finish_date, linetype = 'Harvest end date'))+
-    geom_vline(data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id),] ,aes(xintercept = harvest_start_date, linetype = 'Harvest start date'))+
-    scale_linetype_manual(
-      name = "Harvest date",
-      values = c(
-        "Harvest start date" = "dotted",
-        "Harvest end date" = "dashed"
+      geom_ribbon(
+        aes(x = acquired, ymin = X25., ymax = X75.,
+            fill = block_pixel_stratum, color = block_pixel_stratum),
+        alpha = 0.3
+      ) +
+      geom_point(
+        aes(x = acquired, y = median, color = block_pixel_stratum),
+        alpha = 0.5
+      ) +
+      scale_color_manual(name = "Pixel stratum", values = pixel_strata_color_map) +
+      scale_fill_manual(name = "Pixel stratum",  values = pixel_strata_color_map) +
+      scale_x_break(c(as.POSIXct('2020-11-01 UTC'), as.POSIXct('2021-04-30 UTC'))) +
+      scale_x_break(c(as.POSIXct('2021-11-01 UTC'), as.POSIXct('2022-04-30 UTC'))) +
+      scale_x_break(c(as.POSIXct('2022-11-01 UTC'), as.POSIXct('2023-04-30 UTC'))) +
+      scale_x_break(c(as.POSIXct('2023-11-01 UTC'), as.POSIXct('2024-04-30 UTC'))) +
+      scale_x_datetime(
+        date_labels = "%b %Y",
+        limits = c(as.POSIXct('2020-05-01 UTC'), as.POSIXct('2024-10-31 UTC'))
+      ) +
+      geom_vline(
+        data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id), ],
+        aes(xintercept = harvest_finish_date, linetype = 'Harvest end date')
+      ) +
+      geom_vline(
+        data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id), ],
+        aes(xintercept = harvest_start_date, linetype = 'Harvest start date')
+      ) +
+      scale_linetype_manual(
+        name = "Harvest date",
+        values = c("Harvest start date" = "dotted", "Harvest end date" = "dashed")
+      ) +
+      labs(x = 'Acquisition date', y = unique(subset_df$var_name)) +
+      theme_classic() +
+      theme(
+        axis.text.x.top  = element_blank(),
+        axis.ticks.x.top = element_blank(),
+        axis.text.x = element_text(angle = 90)
+        ,legend.position = 'none' #remove legend
       )
-    )+
-    #facet by dataset (NOTE: using ncols messes up the broken x axis)
-    facet_grid(rows=vars(dataset)
-               # , cols = vars(var_name)
-               , scales='free_y')+
-    labs(x = 'Acquisition date', y = unique(subset_df$var_name))+
-    # ggtitle(unique(subset_df$block_id))+
-    theme_classic()+
-    theme(
-      #remove x axis text on top of plot (put there by ggbreaks)
-      axis.text.x.top = element_blank(),
-      axis.ticks.x.top = element_blank(),
-      #format lower x axis text
-      axis.text.x = element_text(angle=90)
-      #remove legend
-      # ,legend.position = 'none'
+    
+    # 2. Build a separate data frame for the moving line — one row per frame
+    frame_times <- subset_df |>
+      filter(month %in% gs_months, dataset == d) |>
+      distinct(acquired) |>
+      arrange(acquired) |>
+      mutate(frame = row_number())   # <-- key: explicit frame index
+    
+    # 3. Add the animated layer using the SEPARATE data frame + transition_manual
+    animated_plot <- static_base +
+      geom_vline(
+        data    = frame_times,          # own data, not inherited
+        mapping = aes(xintercept = acquired, group = frame),  # group = frame prevents filtering bleed
+        color     = "blue",
+        linewidth = 1
+      ) +
+      transition_manual(frame)          # transition on integer frame, not a shared column
+    
+    # 4. Render
+    animate(
+      animated_plot,
+      nframes  = nrow(frame_times),
+      duration = duration_gs
+      ,height = rheight,
+      width=rwidth
     )
-  pix_plot_full
+  })
+  names(scat_plot_l_gs) = unique(subset_df$dataset)
+  
 }
+
+#----arrange rasters and scatter plots----
+
+#convert scatter plot gganimate gifs to magick objects
+scat_plot_l_magick = pblapply(scat_plot_l_gs, image_read)
+
+#arrange rasters with scatterplots
+
+rast_scats = pblapply(datasets, function(d){
+  r = rast_l_magick[[d]]
+  s = scat_plot_l_magick[[d]]
+  combined <- image_append(c(r, s), stack = TRUE)
+})
+
+
+
+
+
+
 
 
 
@@ -247,138 +303,3 @@ pixel_strata_color_map = c('Not thinned' = "#00BFC4", 'Thinned' = "#F8766D")
   }
   
 }
-
-
-
-
-library(ggbreak)
-
-pixel_strata_color_map = c('Not thinned' = "#00BFC4", 'Thinned' = "#F8766D")
-
-
-# #growing season plot
-# {
-#   pix_plot_gs = ggplot(subset_df |> filter(month %in% gs_months))+
-#     #show 5th to 95th percentiles for pixel strata
-#     # geom_ribbon(aes(x = acquired, ymin = X5., ymax = X95., fill = block_pixel_stratum, colour = block_pixel_stratum), alpha = 0.1)+
-#     #show interquartile range of pixel strata
-#     geom_ribbon(aes(x = acquired, ymin = X25., ymax = X75., fill = block_pixel_stratum, color=block_pixel_stratum), alpha = 0.3)+
-#     #show median pixel values for the different strata
-#     geom_point(aes(x = acquired, y = median, color=block_pixel_stratum),alpha=0.5)+
-#     #format pixel strata
-#     # Custom colors and legend title
-#     scale_color_manual(
-#       name = "Pixel stratum"
-#       ,values = pixel_strata_color_map
-#     ) +
-#     scale_fill_manual(
-#       name = "Pixel stratum"
-#       ,values = pixel_strata_color_map
-#     ) +
-#     #gaps to show only growing season
-#     scale_x_break(c(as.POSIXct('2020-11-01 00:00:00 UTC'),as.POSIXct('2021-04-30 23:59:59 UTC')))+
-#     scale_x_break(c(as.POSIXct('2021-11-01 00:00:00 UTC'),as.POSIXct('2022-04-30 23:59:59 UTC')))+
-#     scale_x_break(c(as.POSIXct('2022-11-01 00:00:00 UTC'),as.POSIXct('2023-04-30 23:59:59 UTC')))+
-#     scale_x_break(c(as.POSIXct('2023-11-01 00:00:00 UTC'),as.POSIXct('2024-04-30 23:59:59 UTC')))+
-#     #format x axis date/time info
-#     scale_x_datetime(
-#       date_labels = "%b %Y",       # e.g., "Jan 2021"
-#       # date_breaks = "3 months",     # choose interval for ticks
-#       limits = c(as.POSIXct('2020-05-01 00:00:00 UTC'),as.POSIXct('2024-10-31 23:59:59 UTC'))
-#     )+
-#     #show vertical lines for start and end of harvesting
-#     geom_vline(data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id),], aes(xintercept = harvest_finish_date, linetype = 'Harvest end date'))+
-#     geom_vline(data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id),] ,aes(xintercept = harvest_start_date, linetype = 'Harvest start date'))+
-#     scale_linetype_manual(
-#       name = "Harvest date",
-#       values = c(
-#         "Harvest start date" = "dotted",
-#         "Harvest end date" = "dashed"
-#       )
-#     )+
-#     #facet by dataset (NOTE: using ncols messes up the broken x axis)
-#     facet_grid(rows=vars(dataset)
-#                # , cols = vars(var_name)
-#                , scales='free_y')+
-#     labs(x = 'Acquisition date', y = unique(subset_df$var_name))+
-#     # ggtitle(unique(subset_df$block_id))+
-#     theme_classic()+
-#     theme(
-#       #remove x axis text on top of plot (put there by ggbreaks)
-#       axis.text.x.top = element_blank(),
-#       axis.ticks.x.top = element_blank(),
-#       #format lower x axis text
-#       axis.text.x = element_text(angle=90)
-#     )
-#   # pix_plot_gs
-# }
-# 
-# #full timeseries plot
-# {
-#   pix_plot_full = ggplot(subset_df)+
-#     #show 5th to 95th percentiles for pixel strata
-#     # geom_ribbon(aes(x = acquired, ymin = X5., ymax = X95., fill = block_pixel_stratum, colour = block_pixel_stratum), alpha = 0.1)+
-#     #show interquartile range of pixel strata
-#     geom_ribbon(aes(x = acquired, ymin = X25., ymax = X75., fill = block_pixel_stratum, color=block_pixel_stratum), alpha = 0.3)+
-#     #show median pixel values for the different strata
-#     geom_point(aes(x = acquired, y = median, color=block_pixel_stratum),alpha=0.3)+
-#     #format pixel strata
-#     # Custom colors and legend title
-#     scale_color_manual(
-#       name = "Pixel stratum"
-#       ,values = pixel_strata_color_map
-#     ) +
-#     scale_fill_manual(
-#       name = "Pixel stratum"
-#       ,values = pixel_strata_color_map
-#     ) +
-#     # #gaps to show only growing season
-#     # scale_x_break(c(as.POSIXct('2020-11-01 00:00:00 UTC'),as.POSIXct('2021-04-30 23:59:59 UTC')))+
-#     # scale_x_break(c(as.POSIXct('2021-11-01 00:00:00 UTC'),as.POSIXct('2022-04-30 23:59:59 UTC')))+
-#     # scale_x_break(c(as.POSIXct('2022-11-01 00:00:00 UTC'),as.POSIXct('2023-04-30 23:59:59 UTC')))+
-#     # scale_x_break(c(as.POSIXct('2023-11-01 00:00:00 UTC'),as.POSIXct('2024-04-30 23:59:59 UTC')))+
-#     #format x axis date/time info
-#     scale_x_datetime(
-#       date_labels = "%b %Y",       # e.g., "Jan 2021"
-#       date_breaks = "3 months",     # choose interval for ticks
-#       limits = c(as.POSIXct('2020-01-01 00:00:00 UTC'),as.POSIXct('2024-10-31 23:59:59 UTC'))
-#     )+
-#     #show vertical lines for start and end of harvesting
-#     geom_vline(data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id),], aes(xintercept = harvest_finish_date, linetype = 'Harvest end date'))+
-#     geom_vline(data = harvest_dates_df[harvest_dates_df$block_id %in% unique(subset_df$block_id),] ,aes(xintercept = harvest_start_date, linetype = 'Harvest start date'))+
-#     scale_linetype_manual(
-#       name = "Harvest date",
-#       values = c(
-#         "Harvest start date" = "dotted",
-#         "Harvest end date" = "dashed"
-#       )
-#     )+
-#     #facet by dataset (NOTE: using ncols messes up the broken x axis)
-#     facet_grid(rows=vars(dataset)
-#                # , cols = vars(var_name)
-#                , scales='free_y')+
-#     labs(x = 'Acquisition date', y = unique(subset_df$var_name))+
-#     # ggtitle(unique(subset_df$block_id))+
-#     theme_classic()+
-#     theme(
-#       #remove x axis text on top of plot (put there by ggbreaks)
-#       axis.text.x.top = element_blank(),
-#       axis.ticks.x.top = element_blank(),
-#       #format lower x axis text
-#       axis.text.x = element_text(angle=90)
-#       #remove legend
-#       # ,legend.position = 'none'
-#     )
-#   pix_plot_full
-# }
-# 
-# #combined plot
-# {
-#   library(patchwork)
-#   (pix_plot_full+ggtitle('A')) + 
-#     (pix_plot_gs+ggtitle('B')) + 
-#     plot_layout(guides='collect', axis_titles = 'collect'
-#                 , ncol=1
-#     )
-# }
-

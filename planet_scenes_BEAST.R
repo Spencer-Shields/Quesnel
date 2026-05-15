@@ -132,8 +132,8 @@ pblapply(1:nrow(dbgrid), function(i){
     metadata$period           = 1.0      # The period is 1 year: deltaTime*freq=1/12*12=1.0
     
     extra = list()
-    extra$numThreadsPerCPU = 3
-    extra$numParThreads = 30
+    extra$numThreadsPerCPU = 2
+    extra$numParThreads = 16
     
     # tic()
     cat('\nRunning BEAST\n')

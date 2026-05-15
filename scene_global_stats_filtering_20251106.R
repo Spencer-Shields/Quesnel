@@ -8,14 +8,16 @@ library(data.table)
 #----load validation data----
 
 #load Otsu thresholds
-lid_met = 'z_p95' #define lidar metric to use for generating binary thinning layers
+lid_met = 'z_above2' #define lidar metric to use for generating binary thinning layers
 
 otsu_f = paste0("data/Quesnel_thinning/Otsu_change_thresholds_Res=",target_res,'lidmet=',lid_met,".csv")
 if(!file.exists(otsu_f)){
   lcmfl = list.files(lid_mets_change_cropped_dir, full.names = T)
   otsu_df = pblapply(block_ids, function(b){
     f = lcmfl[str_detect(lcmfl,b)]
-    r = rast(f, lyrs=lid_met)
+    r = rast(f
+             , lyrs=lid_met
+             )
     o = values(r, na.rm=T) |>
       otsuThresholdCpp(bins=256)
     tbl = tibble(
@@ -73,7 +75,7 @@ if(!file.exists(data_filename)){
   
   #----create thinning masks, get spatial sample for each study area to make thinning/non-thinning classes same size----
   
-  #load lidar CHM change layers
+  #load lidar change layers
   lid_masks_equalclasses = pblapply(lidar_files, function(x){
     
     ##load lidar raster
@@ -398,7 +400,7 @@ if(!file.exists(data_filename)){
 #----load stats table, clean and process dataframe----
 {
   print('Loading and cleaning summary stats')
-  tic()
+  
   results_df_load = read_feather(data_filename) |> setDT()
   
   results_df_ = results_df_load |>
@@ -433,8 +435,9 @@ if(!file.exists(data_filename)){
       str_detect(dataset, 'Zrobust') ~ 'Zrobust',
       str_detect(dataset, 'Z') ~ 'Z',
       TRUE ~ dataset  # keep original value if no match
-    ))
-  toc()
+    )) |>
+    #remove logistic_AUC column since it's only NA
+    select(-logistic_AUC)
 }
 
 #remove scenes that should have been removed during previous steps
